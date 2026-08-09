@@ -398,9 +398,37 @@ cyborg/cyborg-agent
 
 `build.sh` automatically places `base` first for this comma-separated explicit
 selection. Existing single-image, project, and `all` shell targets keep their
-standalone behavior. The provider uses normal `build.sh` source handling, so it
-builds service content from the exact maintained `sources.txt` pins. It does
-not consume speculative service checkouts at this stage.
+standalone behavior.
+
+### Planning and speculative source staging
+
+The installed `oib plan` command is a side-effect-free planning boundary. It
+reads the explicit image list, `sources.txt`, mandatory `image.yaml` files,
+optional inventory mappings, and `zuul.projects`. Its atomic JSON output records
+ordered images, context scopes, deployment keys, source destinations, declared
+refs and maintained pins, inventory commits, and the
+`zuul-prepared-workspace-head` authority reason. It does not fetch Git objects,
+copy repositories, assemble contexts, invoke Ansible or Buildah, publish
+images, or perform cleanup.
+
+Zuul prepares required `requirements`, Watcher, and Cyborg repositories and
+places them in its standard workspace. The shared run playbook resolves those
+checkouts on `builder`, records their actual HEADs, and leaves the prepared
+repositories unchanged. It copies maintained context skeletons and source
+content into isolated `.tmp/build-contexts/<scope>` trees, records separate
+source-placement and context-assembly manifests, and activates a complete
+context tree atomically.
+
+The provider invokes `build.sh` with `S2I_CONTEXTS_ROOT` pointing at those
+contexts and `ERROR_ON_CLONE=1`. Consequently, missing speculative service
+source or prepared context content fails instead of falling back to network
+acquisition. The context keeps each committed filtered
+`requirements.lock.<stream>` as the build constraint input. The prepared
+`requirements` HEAD and its upper-constraints file are validated, staged, and
+recorded, but dependency-aware filtering against that checkout belongs to the
+separate transitive-constraint workflow. Direct contributor and GitHub shell
+builds without `S2I_CONTEXTS_ROOT` retain maintained-pin cloning as an
+independent compatibility path.
 
 ### Image deployment metadata
 
@@ -543,6 +571,15 @@ tox -e unit -- -k test_name_pattern
 
 Tests use temporary directories and local bare Git remotes so they do not
 change a contributor's source checkouts or container storage.
+
+Exercise the installed planning command with:
+
+```console
+tox -e oib-plan -- --help
+```
+
+The planner environment installs the project wheel. It exposes planning only;
+source staging and context assembly remain Ansible responsibilities.
 
 ## Formatting and static analysis
 

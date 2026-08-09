@@ -44,3 +44,7 @@
       when: s2i_ci_install_host_packages | default(true) | bool
       ansible.builtin.command: buildah version
       changed_when: false
+
+    - name: Install Tox for the OIB planning environment
+      ansible.builtin.include_role:
+        name: ensure-tox

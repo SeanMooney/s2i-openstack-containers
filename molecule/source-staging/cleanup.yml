@@ -1,0 +1,17 @@
+---
+- name: Remove speculative source staging fixtures
+  hosts: builder
+  gather_facts: false
+  vars:
+    s2i_test_repo_root: "{{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') }}"
+
+  tasks:
+    - name: Remove source staging generated state
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ s2i_test_repo_root }}/.tmp/molecule/source-staging"
+        - "{{ s2i_test_repo_root }}/.tmp/build-contexts"
+        - "{{ s2i_test_repo_root }}/.tmp/.build-contexts.new"
+        - "{{ s2i_test_repo_root }}/.tmp/.build-contexts.previous"

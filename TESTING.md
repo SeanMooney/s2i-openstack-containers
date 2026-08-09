@@ -8,6 +8,8 @@ For the common checks, run:
 ```console
 tox -e unit
 tox -e linters
+tox -e molecule
+tox -e oib-plan -- --help
 ```
 
 The compatibility environments `test` and `py3` run the same stdlib

@@ -1,4 +1,7 @@
 ---
+- name: Plan and stage speculative source contexts
+  ansible.builtin.import_playbook: ../shared/prepare-sources.yaml
+
 - name: Run shared selective image publication
   ansible.builtin.import_playbook: ../shared/run.yaml
 

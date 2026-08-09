@@ -1,0 +1,49 @@
+---
+- name: Check maintained context skeleton
+  ansible.builtin.stat:
+    path: "{{ s2i_ci_container_repo }}/containers/{{ s2i_ci_context }}"
+  register: s2i_ci_context_skeleton
+
+- name: Require maintained context skeleton
+  ansible.builtin.assert:
+    that:
+      - s2i_ci_context_skeleton.stat.isdir | default(false)
+    fail_msg: "Maintained context is missing: {{ s2i_ci_context }}"
+
+- name: Create isolated context directory
+  ansible.builtin.file:
+    path: "{{ s2i_ci_contexts_assembly }}/{{ s2i_ci_context }}"
+    state: directory
+    mode: "0755"
+
+- name: Copy maintained context skeleton
+  ansible.builtin.copy:
+    src: "{{ s2i_ci_container_repo }}/containers/{{ s2i_ci_context }}/"
+    dest: "{{ s2i_ci_contexts_assembly }}/{{ s2i_ci_context }}/"
+    remote_src: true
+    mode: preserve
+
+- name: Find copied source placeholders
+  ansible.builtin.find:
+    paths: "{{ s2i_ci_contexts_assembly }}/{{ s2i_ci_context }}"
+    patterns: src
+    file_type: directory
+    recurse: true
+  register: s2i_ci_copied_source_directories
+
+- name: Remove copied source placeholder content
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ s2i_ci_copied_source_directories.files }}"
+  loop_control:
+    label: "{{ item.path }}"
+
+- name: Recreate empty source placeholders
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    mode: "0755"
+  loop: "{{ s2i_ci_copied_source_directories.files }}"
+  loop_control:
+    label: "{{ item.path }}"

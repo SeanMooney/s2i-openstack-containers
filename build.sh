@@ -83,6 +83,9 @@
 #   PIP_NO_BINARY     If set, passed as --build-arg to buildah so Containerfiles
 #                     can set ENV PIP_NO_BINARY. Use ":all:" to force pip to
 #                     build all packages from source instead of using wheels.
+#   S2I_CONTEXTS_ROOT Root of complete prepared build contexts. When set,
+#                     build.sh does not materialize sources under containers/.
+#   ERROR_ON_CLONE    Fail rather than enter a Git clone/fetch fallback.
 #   REGISTRY_AUTH_FILE Authentication file passed explicitly to buildah push.
 #   REGISTRY_CERT_DIR  TLS certificate directory passed explicitly to buildah push.
 
@@ -104,6 +107,8 @@ UPSTREAM_CONSTRAINTS="upper-constraints.txt"
 DEFAULT_STREAM="${DEFAULT_STREAM:-master}"
 SKIP_HASH_UPDATE="${SKIP_HASH_UPDATE:-}"
 PIP_NO_BINARY="${PIP_NO_BINARY:-}"
+S2I_CONTEXTS_ROOT="${S2I_CONTEXTS_ROOT:-}"
+ERROR_ON_CLONE="${ERROR_ON_CLONE:-}"
 REGISTRY_AUTH_FILE="${REGISTRY_AUTH_FILE:-}"
 REGISTRY_CERT_DIR="${REGISTRY_CERT_DIR:-}"
 PARALLEL="${PARALLEL:-$(nproc)}"
@@ -190,6 +195,14 @@ cleanup_auto() {
 }
 trap cleanup_auto EXIT
 
+require_clone_allowed() {
+  local description="$1"
+  if [[ -n "${ERROR_ON_CLONE}" ]]; then
+    echo "ERROR: ${description} requires source acquisition while ERROR_ON_CLONE is set" >&2
+    return 1
+  fi
+}
+
 # Ensure constraints file exists for a project.
 # Looks for an "upper-constraints" entry in the project's sources.txt
 # for the current stream and fetches the file at the pinned hash.
@@ -209,6 +222,7 @@ ensure_project_constraints() {
       [[ -z "${entry_stream}" || "${entry_stream}" == \#* ]] && continue
       [[ "${entry_stream}" != "${stream}" ]] && continue
       if [[ "${name}" == "upper-constraints" ]]; then
+        require_clone_allowed "constraints for ${project}" || return 1
         echo "--- Fetching ${UPSTREAM_CONSTRAINTS}.${stream} for ${project} from ${url} at ${pinned_hash} ---"
         local tmp_repo
         tmp_repo=$(mktemp -d)
@@ -237,6 +251,7 @@ clone_at_hash() {
   if [[ -d "${dest}" ]]; then
     return
   fi
+  require_clone_allowed "source ${url} at ${pinned_hash}" || return 1
 
   mkdir -p "$(dirname "${dest}")"
   echo "--- Cloning ${url} at ${pinned_hash} into ${dest} ---"
@@ -279,6 +294,34 @@ ensure_sources_for_stream() {
   fi
 }
 
+# Resolve the complete context used for one image. Prepared contexts must stay
+# beneath this repository's isolated .tmp tree.
+build_context() {
+  local dir_name="$1"
+  local project
+  project="$(project_name "${dir_name}")"
+  if [[ -n "${S2I_CONTEXTS_ROOT}" ]]; then
+    local prepared_root
+    prepared_root=$(realpath -e "${S2I_CONTEXTS_ROOT}") || return 1
+    case "${prepared_root}/" in
+      "${REPO_ROOT}/.tmp/"*) ;;
+      *)
+        echo "ERROR: Prepared contexts must remain beneath ${REPO_ROOT}/.tmp" >&2
+        return 1
+        ;;
+    esac
+    if [[ -n "${project}" ]]; then
+      echo "${prepared_root}/${project}"
+    else
+      echo "${prepared_root}/${dir_name}"
+    fi
+  elif [[ -n "${project}" ]]; then
+    echo "${CONTAINERS_DIR}/${project}"
+  else
+    echo "${CONTAINERS_DIR}/${dir_name}"
+  fi
+}
+
 # Build a single image
 build_image() {
   local dir_name="$1"
@@ -286,14 +329,30 @@ build_image() {
   full_tag="$(image_tag "${dir_name}")"
   local project
   project="$(project_name "${dir_name}")"
+  local context_dir
+  context_dir="$(build_context "${dir_name}")" || return 1
+  local containerfile
+  if [[ -n "${project}" ]]; then
+    containerfile="${context_dir}/${dir_name#*/}/Containerfile"
+  else
+    containerfile="${context_dir}/Containerfile"
+  fi
 
   echo "=== Building ${full_tag} ==="
+  if [[ ! -d "${context_dir}" || ! -f "${containerfile}" ]]; then
+    echo "ERROR: Prepared image context is incomplete: ${context_dir}" >&2
+    return 1
+  fi
 
   # openstack-base image: no service source, build context is its own directory
   if [[ -z "${project}" ]]; then
     local base_constraints="${CONSTRAINTS_FILE}.${STREAM}"
-    local base_lock="${CONTAINERS_DIR}/${dir_name}/${base_constraints}"
+    local base_lock="${context_dir}/${base_constraints}"
     if [[ ! -f "${base_lock}" ]]; then
+      if [[ -n "${S2I_CONTEXTS_ROOT}" ]]; then
+        echo "ERROR: Prepared constraints not found at ${base_lock}" >&2
+        return 1
+      fi
       ensure_project_constraints "${dir_name}" "${STREAM}"
       base_constraints="${UPSTREAM_CONSTRAINTS}.${STREAM}"
     fi
@@ -302,8 +361,8 @@ build_image() {
       --build-arg "CONSTRAINTS_FILE=${base_constraints}" \
       --build-arg "BASE_IMAGE=${BASE_IMAGE}" \
       ${PIP_NO_BINARY:+--build-arg "PIP_NO_BINARY=${PIP_NO_BINARY}"} \
-      -f "${CONTAINERS_DIR}/${dir_name}/Containerfile" \
-      "${CONTAINERS_DIR}/${dir_name}/"
+      -f "${containerfile}" \
+      "${context_dir}/"
     return
   fi
 
@@ -314,11 +373,12 @@ build_image() {
     return 1
   fi
 
-  # Clone sources for this stream
-  ensure_sources_for_stream "${dir_name}" "${STREAM}"
+  if [[ -z "${S2I_CONTEXTS_ROOT}" ]]; then
+    ensure_sources_for_stream "${dir_name}" "${STREAM}"
+  fi
 
   # Verify main source exists
-  local sources_dir="${CONTAINERS_DIR}/${project}/src"
+  local sources_dir="${context_dir}/src"
   local src="${sources_dir}/${project}"
   if [[ ! -d "${src}" ]]; then
     echo "ERROR: Main source not found at ${src}" >&2
@@ -326,10 +386,14 @@ build_image() {
     return 1
   fi
 
-  # Prefer lockfile (<CONSTRAINTS_FILE>.<stream>) if available, otherwise fall back to upstream constraints
+  # Prefer the configured stream constraints and forbid prepared fallbacks.
   local build_constraints="${CONSTRAINTS_FILE}.${STREAM}"
-  local lock_file="${CONTAINERS_DIR}/${project}/${build_constraints}"
+  local lock_file="${context_dir}/${build_constraints}"
   if [[ ! -f "${lock_file}" ]]; then
+    if [[ -n "${S2I_CONTEXTS_ROOT}" ]]; then
+      echo "ERROR: Prepared constraints not found at ${lock_file}" >&2
+      return 1
+    fi
     ensure_project_constraints "${project}" "${STREAM}"
     build_constraints="${UPSTREAM_CONSTRAINTS}.${STREAM}"
   fi
@@ -339,8 +403,8 @@ build_image() {
     --build-arg "CONSTRAINTS_FILE=${build_constraints}" \
     --build-arg "BASE_IMAGE=${BASE_IMAGE}" \
     ${PIP_NO_BINARY:+--build-arg "PIP_NO_BINARY=${PIP_NO_BINARY}"} \
-    -f "${CONTAINERS_DIR}/${dir_name}/Containerfile" \
-    "${CONTAINERS_DIR}/${project}/"
+    -f "${containerfile}" \
+    "${context_dir}/"
 }
 
 # Check that all tags of an image exist locally
@@ -1082,11 +1146,13 @@ case "${ACTION}" in
         tee "${_bp_logdir}/${_bp_img//\//_}.log"
     done
 
-    # Pre-clone sources so parallel builds don't race on the same directories
-    for _bp_img in "${_bp_targets[@]}"; do
-      [[ -z "$(project_name "${_bp_img}")" ]] && continue
-      ensure_sources_for_stream "${_bp_img}" "${STREAM}"
-    done
+    # Pre-clone only for the standalone path. Prepared contexts are complete.
+    if [[ -z "${S2I_CONTEXTS_ROOT}" ]]; then
+      for _bp_img in "${_bp_targets[@]}"; do
+        [[ -z "$(project_name "${_bp_img}")" ]] && continue
+        ensure_sources_for_stream "${_bp_img}" "${STREAM}"
+      done
+    fi
 
     # Build service images in parallel (max PARALLEL at a time)
     _bp_service_imgs=()
@@ -1097,19 +1163,18 @@ case "${ACTION}" in
 
     if [[ ${#_bp_service_imgs[@]} -gt 0 ]]; then
       echo "--- Building ${#_bp_service_imgs[@]} images (max ${PARALLEL} parallel) ---"
-      declare -A _bp_pids=()
+      _bp_pids=()
       _bp_fail=0
       _bp_running=0
 
       for _bp_img in "${_bp_service_imgs[@]}"; do
         while [[ ${_bp_running} -ge ${PARALLEL} ]]; do
-          _bp_finished=""
-          if wait -n -p _bp_finished "${!_bp_pids[@]}"; then
-            unset '_bp_pids['"${_bp_finished}"']'
+          _bp_pid="${_bp_pids[0]}"
+          if wait "${_bp_pid}"; then
+            _bp_pids=("${_bp_pids[@]:1}")
             ((_bp_running--)) || true
           else
             _bp_fail=1
-            [[ -n "${_bp_finished}" ]] && unset '_bp_pids['"${_bp_finished}"']'
             break 2
           fi
         done
@@ -1121,19 +1186,16 @@ case "${ACTION}" in
             sed -u "s|^|[${_bp_img}] |" |
             tee "${_bp_log}"
         ) &
-        _bp_pids[$!]="${_bp_img}"
+        _bp_pids+=("$!")
         ((_bp_running++)) || true
       done
 
       if [[ ${_bp_fail} -eq 0 ]]; then
-        while [[ ${_bp_running} -gt 0 ]]; do
-          _bp_finished=""
-          if wait -n -p _bp_finished "${!_bp_pids[@]}"; then
-            unset '_bp_pids['"${_bp_finished}"']'
+        for _bp_pid in "${_bp_pids[@]}"; do
+          if wait "${_bp_pid}"; then
             ((_bp_running--)) || true
           else
             _bp_fail=1
-            [[ -n "${_bp_finished}" ]] && unset '_bp_pids['"${_bp_finished}"']'
             break
           fi
         done
@@ -1141,7 +1203,7 @@ case "${ACTION}" in
 
       if [[ ${_bp_fail} -eq 1 ]]; then
         echo "ERROR: A build failed; stopping remaining builds" >&2
-        for _bp_pid in "${!_bp_pids[@]}"; do
+        for _bp_pid in "${_bp_pids[@]}"; do
           kill "${_bp_pid}" 2>/dev/null || true
         done
         wait 2>/dev/null || true

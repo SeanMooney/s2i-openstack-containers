@@ -77,25 +77,22 @@
           - "',' not in s2i_ci_tag"
         fail_msg: Selective provider inputs are invalid
 
-    - name: Record normalized selective targets
-      ansible.builtin.set_fact:
-        s2i_ci_selected_images: "{{ (['base'] + s2i_ci_images) | unique | list }}"
-        s2i_ci_target_expression: "{{ s2i_ci_images | join(',') }}"
-        s2i_ci_effective_image_mappings: {}
-        s2i_ci_mapping_sources: {}
+    - name: Inspect prepared context root
+      ansible.builtin.stat:
+        path: "{{ s2i_ci_contexts_root }}"
+      register: s2i_ci_prepared_contexts
 
-    - name: Validate optional mapping overrides
-      ansible.builtin.include_tasks: validate-mapping-overrides.yaml
-
-    - name: Load and validate selected image metadata
-      ansible.builtin.include_tasks: image-metadata-item.yaml
-      loop: "{{ s2i_ci_selected_images }}"
-      loop_control:
-        loop_var: s2i_ci_image
-        label: "{{ s2i_ci_image }}"
-
-    - name: Validate effective deployment key ownership
-      ansible.builtin.include_tasks: validate-deployment-keys.yaml
+    - name: Require planner-owned metadata and Ansible-owned contexts
+      ansible.builtin.assert:
+        that:
+          - s2i_ci_plan is mapping
+          - s2i_ci_selected_images == s2i_ci_plan.images
+          - s2i_ci_target_expression == s2i_ci_plan.target_expression
+          - s2i_ci_effective_image_mappings is mapping
+          - s2i_ci_mapping_sources is mapping
+          - s2i_ci_effective_image_mappings.keys() | list | sort ==
+              s2i_ci_selected_images | sort
+          - s2i_ci_prepared_contexts.stat.isdir | default(false)
 
     - name: Load the normalized registry connection
       ansible.builtin.slurp:
@@ -166,7 +163,7 @@
                'target': s2i_ci_target_expression
              } | to_nice_json }}
 
-    - name: Build selected images from committed source pins
+    - name: Build selected images from prepared source contexts
       ansible.builtin.command:
         argv:
           - "{{ s2i_ci_container_repo }}/build.sh"
@@ -180,6 +177,8 @@
         TAG: "{{ s2i_ci_tag }}"
         PARALLEL: "{{ s2i_ci_parallel | string }}"
         BUILD_LOGS_DIR: "{{ s2i_ci_log_dir }}"
+        S2I_CONTEXTS_ROOT: "{{ s2i_ci_contexts_root }}"
+        ERROR_ON_CLONE: "1"
       register: s2i_ci_build
       changed_when: s2i_ci_build.rc == 0
 

@@ -1,0 +1,33 @@
+---
+driver:
+  name: default
+  options:
+    managed: false
+    ansible_connection_options:
+      ansible_connection: local
+
+platforms:
+  - name: localhost
+    groups:
+      - builder
+
+provisioner:
+  name: ansible
+  env:
+    ANSIBLE_LOCAL_TEMP: "${MOLECULE_PROJECT_DIRECTORY}/.tmp/ansible/local-tmp"
+    PATH: "${MOLECULE_PROJECT_DIRECTORY}/.tmp/molecule/source-staging/bin:${PATH}"
+  inventory:
+    host_vars:
+      localhost:
+        ansible_connection: local
+
+verifier:
+  name: ansible
+
+scenario:
+  test_sequence:
+    - syntax
+    - prepare
+    - converge
+    - verify
+    - cleanup

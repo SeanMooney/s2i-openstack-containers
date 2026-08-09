@@ -1,0 +1,268 @@
+---
+- name: Plan and stage speculative sources into isolated contexts
+  hosts: builder
+  vars:
+    s2i_ci_output_dir: "{{ ansible_user_dir }}/zuul-output"
+    s2i_ci_log_dir: "{{ s2i_ci_output_dir }}/logs/container-build"
+    s2i_ci_workspace_root: "{{ zuul_user_dir | default(ansible_user_dir) }}"
+
+  tasks:
+    - name: Default optional planning inputs
+      ansible.builtin.set_fact:
+        s2i_ci_stream: "{{ s2i_ci_stream | default('master') }}"
+        s2i_ci_images: "{{ s2i_ci_images | default([]) }}"
+        s2i_ci_image_mappings: "{{ s2i_ci_image_mappings | default({}) }}"
+
+    - name: Require the selected container project
+      ansible.builtin.assert:
+        that:
+          - zuul is mapping
+          - zuul.projects is mapping
+          - s2i_ci_container_project in zuul.projects
+
+    - name: Resolve the inventory-described container repository
+      ansible.builtin.set_fact:
+        s2i_ci_container_repo: >-
+          {{ s2i_ci_workspace_root }}/{{
+             zuul.projects[s2i_ci_container_project].src_dir }}
+
+    - name: Resolve source-planning paths
+      ansible.builtin.set_fact:
+        s2i_ci_plan_input: "{{ s2i_ci_container_repo }}/.tmp/plan-input.json"
+        s2i_ci_plan_file: "{{ s2i_ci_log_dir }}/build-plan.json"
+        s2i_ci_contexts_root: >-
+          {{ s2i_ci_container_repo }}/.tmp/build-contexts
+        s2i_ci_contexts_assembly: >-
+          {{ s2i_ci_container_repo }}/.tmp/.build-contexts.new
+        s2i_ci_contexts_previous: >-
+          {{ s2i_ci_container_repo }}/.tmp/.build-contexts.previous
+
+    - name: Inspect the container repository entry point
+      ansible.builtin.stat:
+        path: "{{ s2i_ci_container_repo }}/build.sh"
+      register: s2i_ci_container_entry_point
+
+    - name: Canonicalize the builder workspace root
+      ansible.builtin.command:
+        argv:
+          - realpath
+          - --canonicalize-existing
+          - "{{ s2i_ci_workspace_root }}"
+      register: s2i_ci_workspace_root_realpath
+      changed_when: false
+      failed_when: false
+
+    - name: Canonicalize the selected container repository
+      ansible.builtin.command:
+        argv:
+          - realpath
+          - --canonicalize-existing
+          - "{{ s2i_ci_container_repo }}"
+      register: s2i_ci_container_repo_realpath
+      changed_when: false
+      failed_when: false
+
+    - name: Require a safe container repository on the builder
+      ansible.builtin.assert:
+        that:
+          - s2i_ci_container_entry_point.stat.isreg | default(false)
+          - s2i_ci_workspace_root_realpath.rc == 0
+          - s2i_ci_container_repo_realpath.rc == 0
+          - s2i_ci_container_repo_realpath.stdout.startswith(
+              s2i_ci_workspace_root_realpath.stdout + '/')
+
+    - name: Create planning and artifact directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - "{{ s2i_ci_container_repo }}/.tmp"
+        - "{{ s2i_ci_log_dir }}"
+
+    - name: Write immutable planner input
+      ansible.builtin.copy:
+        dest: "{{ s2i_ci_plan_input }}"
+        mode: "0644"
+        content: |
+          {{ {
+               'workspace_root': s2i_ci_workspace_root,
+               'container_project': s2i_ci_container_project,
+               'projects': zuul.projects,
+               'images': s2i_ci_images,
+               'stream': s2i_ci_stream,
+               'image_mappings': s2i_ci_image_mappings
+             } | to_nice_json }}
+
+    - name: Run the installed side-effect-free OIB planner
+      ansible.builtin.command:
+        argv:
+          - "{{ tox_executable | default('tox') }}"
+          - -e
+          - oib-plan
+          - --
+          - plan
+          - --repo-root
+          - "{{ s2i_ci_container_repo }}"
+          - --input
+          - "{{ s2i_ci_plan_input }}"
+          - --output
+          - "{{ s2i_ci_plan_file }}"
+        chdir: "{{ s2i_ci_container_repo }}"
+      changed_when: true
+
+    - name: Load the OIB build plan
+      ansible.builtin.slurp:
+        src: "{{ s2i_ci_plan_file }}"
+      register: s2i_ci_plan_data
+
+    - name: Decode the OIB build plan
+      ansible.builtin.set_fact:
+        s2i_ci_plan: >-
+          {{ s2i_ci_plan_data.content | b64decode | from_json }}
+
+    - name: Require the explicit C2 provider contract in the plan
+      ansible.builtin.assert:
+        that:
+          - s2i_ci_plan.version == 1
+          - s2i_ci_plan.stream == s2i_ci_stream
+          - s2i_ci_plan.images | length == s2i_ci_images | length + 1
+          - s2i_ci_plan.images[0] == 'base'
+          - s2i_ci_plan.images[1:] == s2i_ci_images
+          - s2i_ci_plan.target_expression == s2i_ci_images | join(',')
+          - s2i_ci_plan.projects | length > 1
+          - s2i_ci_plan.sources | length > 0
+
+    - name: Initialize planned provider metadata
+      ansible.builtin.set_fact:
+        s2i_ci_selected_images: "{{ s2i_ci_plan.images }}"
+        s2i_ci_target_expression: "{{ s2i_ci_plan.target_expression }}"
+        s2i_ci_effective_image_mappings: {}
+        s2i_ci_mapping_sources: {}
+        s2i_ci_source_placements: []
+
+    - name: Expand planned deployment metadata
+      ansible.builtin.include_tasks: planned-metadata-item.yaml
+      loop: "{{ s2i_ci_plan.image_metadata }}"
+      loop_control:
+        loop_var: s2i_ci_planned_image
+        label: "{{ s2i_ci_planned_image.image }}"
+
+    - name: Remove incomplete context assembly state
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ s2i_ci_contexts_assembly }}"
+        - "{{ s2i_ci_contexts_previous }}"
+
+    - name: Create isolated context assembly root
+      ansible.builtin.file:
+        path: "{{ s2i_ci_contexts_assembly }}"
+        state: directory
+        mode: "0755"
+
+    - name: Canonicalize isolated context assembly root
+      ansible.builtin.command:
+        argv:
+          - realpath
+          - --canonicalize-existing
+          - "{{ s2i_ci_contexts_assembly }}"
+      register: s2i_ci_contexts_assembly_realpath
+      changed_when: false
+
+    - name: Require the isolated context root beneath repository temporary state
+      ansible.builtin.assert:
+        that:
+          - s2i_ci_contexts_assembly_realpath.stdout.startswith(
+              s2i_ci_container_repo_realpath.stdout + '/.tmp/')
+
+    - name: Copy maintained context skeletons
+      ansible.builtin.include_tasks: context-skeleton-item.yaml
+      loop: "{{ s2i_ci_plan.contexts }}"
+      loop_control:
+        loop_var: s2i_ci_context
+        label: "{{ s2i_ci_context }}"
+
+    - name: Stage authoritative workspace sources
+      ansible.builtin.include_tasks: source-placement-item.yaml
+      loop: "{{ s2i_ci_plan.sources }}"
+      loop_control:
+        loop_var: s2i_ci_planned_source
+        label: >-
+          {{ s2i_ci_planned_source.canonical_name }} ->
+          {{ s2i_ci_planned_source.destination }}
+
+    - name: Write observed source-placement manifest
+      ansible.builtin.copy:
+        dest: "{{ s2i_ci_log_dir }}/source-placements.json"
+        mode: "0644"
+        content: |
+          {{ {
+               'workspace_root': s2i_ci_workspace_root_realpath.stdout,
+               'authority': 'zuul-prepared-workspace-head',
+               'sources': s2i_ci_source_placements
+             } | to_nice_json }}
+
+    - name: Check previous complete context tree
+      ansible.builtin.stat:
+        path: "{{ s2i_ci_contexts_root }}"
+      register: s2i_ci_contexts_existing
+
+    - name: Preserve previous complete context tree
+      when: s2i_ci_contexts_existing.stat.exists | default(false)
+      ansible.builtin.command:
+        argv:
+          - mv
+          - --no-target-directory
+          - "{{ s2i_ci_contexts_root }}"
+          - "{{ s2i_ci_contexts_previous }}"
+      changed_when: true
+
+    - name: Atomically activate assembled contexts
+      block:
+        - name: Activate complete context tree
+          ansible.builtin.command:
+            argv:
+              - mv
+              - --no-target-directory
+              - "{{ s2i_ci_contexts_assembly }}"
+              - "{{ s2i_ci_contexts_root }}"
+          changed_when: true
+      rescue:
+        - name: Remove incomplete activated context tree
+          ansible.builtin.file:
+            path: "{{ s2i_ci_contexts_root }}"
+            state: absent
+
+        - name: Restore previous complete context tree
+          when: s2i_ci_contexts_existing.stat.exists | default(false)
+          ansible.builtin.command:
+            argv:
+              - mv
+              - --no-target-directory
+              - "{{ s2i_ci_contexts_previous }}"
+              - "{{ s2i_ci_contexts_root }}"
+          changed_when: true
+
+        - name: Fail after context activation rollback
+          ansible.builtin.fail:
+            msg: Failed to activate the assembled build contexts
+      always:
+        - name: Remove superseded context tree
+          ansible.builtin.file:
+            path: "{{ s2i_ci_contexts_previous }}"
+            state: absent
+
+    - name: Write assembled-context manifest
+      ansible.builtin.copy:
+        dest: "{{ s2i_ci_log_dir }}/build-contexts.json"
+        mode: "0644"
+        content: |
+          {{ {
+               'contexts_root': s2i_ci_contexts_root,
+               'contexts': s2i_ci_plan.contexts,
+               'images': s2i_ci_plan.images,
+               'target_expression': s2i_ci_plan.target_expression,
+               'sources': s2i_ci_source_placements
+             } | to_nice_json }}

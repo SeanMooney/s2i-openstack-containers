@@ -14,7 +14,7 @@
 - job:
     name: s2i-openstack-containers-molecule
     parent: tox
-    description: Run provider registry and cleanup contract scenarios.
+    description: Run provider registry, staging, and cleanup scenarios.
     vars:
       tox_envlist: molecule
 
@@ -30,7 +30,7 @@
     abstract: true
     description: |
       Build and publish a maintained subset of OpenStack service container
-      images from committed source pins for dependent jobs.
+      images from speculative Zuul source checkouts for dependent jobs.
 
       The job uses the upstream container repository by default. A child job
       can add another container repository to ``required-projects`` and select
@@ -40,6 +40,9 @@
     required-projects:
       - github.com/openstack-k8s-operators/s2i-openstack-containers
       - opendev.org/zuul/zuul-jobs
+      - opendev.org/openstack/requirements
+      - opendev.org/openstack/cyborg
+      - opendev.org/openstack/watcher
     pre-run:
       - playbooks/container-ci/zuul/reset-static-node.yaml
       - playbooks/container-ci/zuul/pre.yaml
