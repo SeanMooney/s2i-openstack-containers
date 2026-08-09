@@ -1,16 +1,31 @@
 ---
-# Containerfile and repo hygiene hooks.
+default_language_version:
+  python: python3
+
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:
       - id: trailing-whitespace
       - id: end-of-file-fixer
-      - id: check-merge-conflict
-      - id: check-yaml
-        files: \.(yaml|yml)$
       - id: mixed-line-ending
         args: [--fix=lf]
+      - id: fix-byte-order-marker
+      - id: check-executables-have-shebangs
+      - id: check-shebang-scripts-are-executable
+      - id: check-yaml
+        files: .*\.(yaml|yml)$
+        args: [--allow-multiple-documents]
+      - id: check-json
+        files: .*\.json$
+      - id: check-ast
+      - id: check-added-large-files
+      - id: check-case-conflict
+      - id: check-symlinks
+      - id: detect-private-key
+      - id: check-merge-conflict
+      - id: debug-statements
+      - id: check-docstring-first
 
   - repo: https://github.com/openstack/bashate
     rev: 2.1.1
@@ -36,3 +51,24 @@ repos:
         name: hadolint (Containerfiles)
         # identify tags Containerfile as type dockerfile
         types: [dockerfile]
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.12.1
+    hooks:
+      - id: ruff-check
+        args: [--fix, --unsafe-fixes]
+        files: ^tests/.*\.py$
+      - id: ruff-format
+        files: ^tests/.*\.py$
+
+  - repo: https://opendev.org/openstack/hacking
+    rev: 8.0.0
+    hooks:
+      - id: hacking
+        additional_dependencies: []
+        files: ^tests/.*\.py$
+
+  - repo: https://github.com/ansible/ansible-lint
+    rev: v25.9.0
+    hooks:
+      - id: ansible-lint
