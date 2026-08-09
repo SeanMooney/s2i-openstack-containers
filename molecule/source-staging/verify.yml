@@ -1,0 +1,78 @@
+---
+- name: Verify speculative source staging contracts
+  hosts: builder
+  gather_facts: false
+  vars:
+    s2i_test_repo_root: "{{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') }}"
+    s2i_test_root: "{{ s2i_test_repo_root }}/.tmp/molecule/source-staging"
+    s2i_test_logs: "{{ s2i_test_root }}/zuul-output/logs/container-build"
+
+  tasks:
+    - name: Check assembled source and context files
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ s2i_test_repo_root }}/.tmp/build-contexts/base/Containerfile"
+        - "{{ s2i_test_repo_root }}/.tmp/build-contexts/watcher/watcher-base/Containerfile"
+        - "{{ s2i_test_repo_root }}/.tmp/build-contexts/watcher/src/watcher/fixture.txt"
+        - "{{ s2i_test_repo_root }}/.tmp/build-contexts/cyborg/src/cyborg/fixture.txt"
+        - "{{ s2i_test_repo_root }}/.tmp/build-contexts/base/upper-constraints.txt.master"
+        - "{{ s2i_test_logs }}/build-plan.json"
+        - "{{ s2i_test_logs }}/source-placements.json"
+        - "{{ s2i_test_logs }}/build-contexts.json"
+      register: s2i_test_staged_files
+
+    - name: Require complete assembled source and context files
+      ansible.builtin.assert:
+        that:
+          - s2i_test_staged_files.results |
+              selectattr('stat.exists', 'equalto', false) | list | length == 0
+
+    - name: Check copied repository metadata preservation
+      ansible.builtin.stat:
+        path: >-
+          {{ s2i_test_repo_root }}/.tmp/build-contexts/watcher/src/watcher/.git
+      register: s2i_test_copied_git
+
+    - name: Require copied repository metadata preservation
+      ansible.builtin.assert:
+        that:
+          - s2i_test_copied_git.stat.isdir | default(false)
+
+    - name: Load source-placement manifest
+      ansible.builtin.slurp:
+        src: "{{ s2i_test_logs }}/source-placements.json"
+      register: s2i_test_source_manifest_data
+
+    - name: Decode source-placement manifest
+      ansible.builtin.set_fact:
+        s2i_test_source_manifest: >-
+          {{ s2i_test_source_manifest_data.content | b64decode | from_json }}
+
+    - name: Require prepared HEAD authority records
+      ansible.builtin.assert:
+        that:
+          - s2i_test_source_manifest.authority ==
+              'zuul-prepared-workspace-head'
+          - s2i_test_source_manifest.sources |
+              selectattr('actual_commit', 'equalto', 'watcher-actual-head') |
+              list | length == 1
+          - s2i_test_source_manifest.sources |
+              selectattr('actual_commit', 'equalto', 'cyborg-actual-head') |
+              list | length == 1
+          - s2i_test_source_manifest.sources |
+              selectattr('actual_commit', 'equalto',
+                         'requirements-actual-head') |
+              list | length == 3
+
+    - name: Read original prepared workspace content
+      ansible.builtin.slurp:
+        src: >-
+          {{ s2i_test_root }}/workspace/opendev.org/openstack/watcher/fixture.txt
+      register: s2i_test_original_watcher
+
+    - name: Require prepared workspace to remain unchanged
+      ansible.builtin.assert:
+        that:
+          - s2i_test_original_watcher.content | b64decode ==
+              'watcher speculative content\n'

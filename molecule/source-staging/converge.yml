@@ -1,0 +1,36 @@
+---
+- name: Exercise planner and builder-owned source staging
+  ansible.builtin.import_playbook: >-
+    ../../playbooks/container-ci/shared/prepare-sources.yaml
+  vars:
+    s2i_test_repo_root: "{{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') }}"
+    s2i_test_repo_name: "{{ s2i_test_repo_root | basename }}"
+    s2i_test_workspace: >-
+      {{ s2i_test_repo_root }}/.tmp/molecule/source-staging/workspace
+    zuul_user_dir: "{{ s2i_test_repo_root | dirname }}"
+    s2i_ci_output_dir: >-
+      {{ s2i_test_repo_root }}/.tmp/molecule/source-staging/zuul-output
+    s2i_ci_container_project: github.com/example/s2i-openstack-containers
+    s2i_ci_images:
+      - watcher/watcher-base
+      - cyborg/cyborg
+      - cyborg/cyborg-agent
+    s2i_ci_stream: master
+    s2i_ci_image_mappings: {}
+    zuul:
+      projects:
+        github.com/example/s2i-openstack-containers:
+          src_dir: "{{ s2i_test_repo_name }}"
+          commit: container-actual-head
+        opendev.org/openstack/requirements:
+          src_dir: >-
+            {{ s2i_test_repo_name }}/.tmp/molecule/source-staging/workspace/opendev.org/openstack/requirements
+          commit: requirements-inventory-head
+        opendev.org/openstack/watcher:
+          src_dir: >-
+            {{ s2i_test_repo_name }}/.tmp/molecule/source-staging/workspace/opendev.org/openstack/watcher
+          commit: watcher-inventory-head
+        opendev.org/openstack/cyborg:
+          src_dir: >-
+            {{ s2i_test_repo_name }}/.tmp/molecule/source-staging/workspace/opendev.org/openstack/cyborg
+          commit: cyborg-inventory-head

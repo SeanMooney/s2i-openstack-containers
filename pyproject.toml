@@ -1,3 +1,20 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "openstack-image-builder"
+version = "0.1.0"
+description = "Plan OpenStack image build inputs"
+requires-python = ">=3.11"
+dependencies = ["PyYAML>=6.0.2"]
+
+[project.scripts]
+oib = "openstack_image_builder.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["openstack_image_builder"]
+
 [tool.ruff]
 line-length = 79
 target-version = "py311"
@@ -15,6 +32,7 @@ ignore = [
 "tests/*" = ["S"]
 
 [tool.ruff.lint.isort]
+known-first-party = ["openstack_image_builder"]
 force-single-line = true
 lines-after-imports = 2
 lines-between-types = 1
