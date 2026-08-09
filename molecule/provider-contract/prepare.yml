@@ -1,0 +1,57 @@
+---
+- name: Prepare provider contract fixtures
+  hosts: builder
+  gather_facts: false
+  vars:
+    s2i_test_repo_root: "{{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') }}"
+    s2i_test_root: "{{ s2i_test_repo_root }}/.tmp/molecule/provider-contract"
+
+  tasks:
+    - name: Reset provider contract fixture state
+      ansible.builtin.file:
+        path: "{{ s2i_test_root }}"
+        state: absent
+
+    - name: Create provider contract fixture directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - "{{ s2i_test_root }}/bin"
+        - "{{ s2i_test_root }}/zuul-output/logs/container-build"
+
+    - name: Install the fake container client
+      ansible.builtin.copy:
+        src: fake-container-client.py
+        dest: "{{ s2i_test_root }}/bin/fake-container-client.py"
+        mode: "0755"
+
+    - name: Link fake Podman and Buildah clients
+      ansible.builtin.file:
+        src: "{{ s2i_test_root }}/bin/fake-container-client.py"
+        dest: "{{ s2i_test_root }}/bin/{{ item }}"
+        state: link
+      loop:
+        - podman
+        - buildah
+
+    - name: Initialize fake container storage
+      ansible.builtin.copy:
+        dest: "{{ s2i_test_root }}/state.json"
+        mode: "0600"
+        content: |
+          {{ {'podman': [], 'buildah': [], 'commands': []} | to_nice_json }}
+
+    - name: Write normalized registry connection
+      ansible.builtin.copy:
+        dest: "{{ s2i_test_root }}/zuul-output/.s2i-ci-registry-connection.json"
+        mode: "0600"
+        content: |
+          {{ {
+               'endpoint': 'registry.test:5000',
+               'public_host': '192.0.2.10',
+               'public_port': 5000,
+               'auth_file': '',
+               'cert_dir': ''
+             } | to_nice_json }}

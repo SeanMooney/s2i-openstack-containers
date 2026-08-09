@@ -1,0 +1,13 @@
+---
+- name: Remove provider contract fixtures
+  hosts: builder
+  gather_facts: false
+  vars:
+    s2i_test_root: >-
+      {{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') }}/.tmp/molecule/provider-contract
+
+  tasks:
+    - name: Remove provider contract fixture state
+      ansible.builtin.file:
+        path: "{{ s2i_test_root }}"
+        state: absent

@@ -1,0 +1,10 @@
+---
+- name: Record exact reference for selected image
+  ansible.builtin.set_fact:
+    s2i_ci_target_references: >-
+      {{ s2i_ci_target_references |
+         combine({s2i_ci_image: s2i_ci_published_images[s2i_ci_image_index]}) }}
+    s2i_ci_local_target_references: >-
+      {{ s2i_ci_local_target_references |
+         combine({s2i_ci_image:
+                    s2i_ci_local_published_images[s2i_ci_image_index]}) }}

@@ -54,7 +54,11 @@ resulting images.
 Konflux owns hermetic production provenance and publication. Treat its recorded
 inputs and outputs as authoritative for production images.
 
-The GitHub workflows have narrower roles:
+The GitHub and Zuul workflows have narrower development roles. The abstract
+Zuul content-provider job publishes selected speculative images only to its
+ephemeral buildset registry; it is not a production publication lane.
+
+The GitHub workflows have these roles:
 
 - `build.yml` builds images for pull requests and manual runs.
 - `test.yml` runs tests and verifies source regeneration.
@@ -78,8 +82,9 @@ tox.ini                      dependency-managed contributor commands
 pyproject.toml               Python lint and format configuration
 .pre-commit-config.yaml      repository-wide quality checks
 .ansible-lint                Ansible lint policy
-.zuul.yaml                   reusable unit and linter job definitions
+.zuul.yaml                   reusable test and content-provider jobs
 .github/workflows/           GitHub development automation
+playbooks/container-ci/      shared builder and Zuul adapter playbooks
 containers/base/             common UBI-based runtime image
 containers/cyborg/           Cyborg source and image contexts
 containers/watcher/          Watcher source and image context
@@ -100,6 +105,7 @@ containers/<project>/
   src/
   <image>/
     Containerfile
+    image.yaml
     bindeps.txt
     builddeps.txt
     pythondeps.txt
@@ -135,6 +141,15 @@ containers/<project>/
 **Generated file**
 : A tracked file produced by `build.sh update-sources`, such as a lock file,
   constraints snapshot, RPM input file, or default-stream symlink.
+
+**Content provider**
+: A paused Zuul job that builds and publishes selected images to the buildset's
+  ephemeral registry, then returns exact references to dependent jobs.
+
+**Deployment key**
+: An OpenStackVersion custom-container-image field listed in an image's local
+  `image.yaml`. The provider expands that field to the image's exact successful
+  buildset reference. Empty key lists are valid.
 
 # Part II - Preparing and Building
 
@@ -365,6 +380,95 @@ The push operation verifies that every expected local tag exists before it
 pushes any target. This command is an explicit contributor action. It does not
 change Konflux's production authority.
 
+## Selective Zuul content provider
+
+The abstract `s2i-openstack-container-content-provider` job runs on the
+CentOS Stream 10 nodeset host named `builder`. All host preparation, registry
+validation, builds, publication, result generation, and cleanup target that
+host explicitly. The Zuul executor controls Ansible but does not perform those
+mutations.
+
+The provider defaults to this explicit set:
+
+```text
+watcher/watcher-base
+cyborg/cyborg
+cyborg/cyborg-agent
+```
+
+`build.sh` automatically places `base` first for this comma-separated explicit
+selection. Existing single-image, project, and `all` shell targets keep their
+standalone behavior. The provider uses normal `build.sh` source handling, so it
+builds service content from the exact maintained `sources.txt` pins. It does
+not consume speculative service checkouts at this stage.
+
+### Image deployment metadata
+
+Every buildable Containerfile has a sibling `image.yaml` with this local
+schema:
+
+```yaml
+openstack_version:
+  custom_container_images: []
+```
+
+The list may be empty or contain multiple deployment keys. The consolidated
+`watcher/watcher-base` image declares:
+
+```yaml
+openstack_version:
+  custom_container_images:
+    - watcherAPIImage
+    - watcherApplierImage
+    - watcherDecisionEngineImage
+```
+
+All three keys resolve to the same exact `openstack-watcher-base` reference.
+The image contains the API, applier, and decision-engine entry points and the
+union of their runtime dependencies. Watcher is intentionally not split into
+process-specific images.
+
+Both Cyborg images build and publish, but their tracked key lists are empty.
+Their exact references therefore appear in provider diagnostics without adding
+fields to the default deployment map.
+
+A child job may provide `s2i_ci_image_mappings` as a mapping from a selected
+image target to a replacement list of keys. Replacement is per image rather
+than additive. The provider records whether each effective list came from
+tracked or inventory metadata and rejects malformed values, unknown or unbuilt
+image targets, empty key strings, duplicate keys, and a key assigned to more
+than one image.
+
+### Registry and returned data
+
+The provider starts or inherits a Zuul buildset registry, validates push and
+pull with a dedicated UBI tag, builds and pushes the selected image set, and
+pulls every exact result back. Credentials and certificate data remain in
+Zuul secret data. Returned public diagnostics use the buildset registry's
+reachable host or IP and port, never the builder-local registry alias.
+
+`s2i_ci_content.images` contains every exact successful reference, including
+base and both unmapped Cyborg images. The partial
+`content_provider_os_custom_container_images` map contains only effective
+keys joined to exact successful references. The legacy global OS registry URL
+remains the neutral `null` sentinel, while its namespace/tag and gating-repo
+fields remain empty or false because this selective provider does not publish a
+complete OpenStack image namespace. `cifmw_build_images_output`
+remains an empty mapping and is not repurposed for service images.
+
+Intended references are written before build mutation. Post-run cleanup
+removes only those exact Podman pullback and Buildah build tags, verifies exact
+absence, and removes a buildset registry only when its ownership marker is
+valid.
+Per-image parallel logs and registry/result manifests are retained under
+`zuul-output/logs/container-build/`.
+
+The provider pauses while dependent jobs run. Private onboarding may attach a
+trivial child that prints the returned registry paths and maps. That debug job
+does not pull images, patch an OpenStackVersion resource, deploy OpenStack, or
+invoke a downstream repository's playbooks. Downstream consumption is separate
+work.
+
 ## Updating source pins and locks
 
 Advance source records and regenerate dependent files with:
@@ -493,10 +597,14 @@ interfaces use the same rules.
 
 GitHub runs build, unit, linter, and source-update workflows as described in
 `Publication authority`. The repository also defines reusable unit, linter,
-and pinned source-reproducibility jobs in `.zuul.yaml`; project attachment is
-intentionally managed outside those job definitions. The
-source-reproducibility job is intentionally unattached in this repository
-snapshot.
+pinned source-reproducibility, Molecule, and abstract selective
+content-provider jobs in `.zuul.yaml`; project attachment is intentionally
+managed outside those job definitions. The source-reproducibility job is
+intentionally unattached in this repository snapshot.
+
+The provider's Molecule scenario exercises normalized registry validation,
+tracked and inventory deployment metadata, exact-reference expansion, and
+matching Podman/Buildah cleanup with self-contained fake container clients.
 
 Neither development automation path changes Konflux's authority for hermetic
 production provenance and publication.
@@ -572,18 +680,40 @@ Check the stream-suffixed files in the project directory and the unsuffixed
 symlinks used by Containerfiles. Regenerate the project for the selected stream
 rather than manually repairing a generated symlink or lock file.
 
-## A parallel build fails without immediate context
+## A parallel build fails
 
-Set `BUILD_LOGS_DIR` and inspect the per-image files after the command exits:
+Set `BUILD_LOGS_DIR` and inspect the retained per-image files:
 
 ```console
 STREAM=master BUILD_LOGS_DIR=.tmp/build-logs \
   ./build.sh build-parallel all
 ```
 
-The current parallel implementation replays stored logs after the parallel
-phase. Use a serial build of the failing image when immediate terminal output
-is more useful.
+Parallel service output is prefixed by image and streamed while each build
+runs. The command preserves the failing exit status, stops outstanding builds,
+and reports the log directory without replaying every successful log.
+
+## Provider output or cleanup is incomplete
+
+Read provider artifacts in this order:
+
+```text
+intended-images.json
+registry-state.json
+build.log and per-image logs
+push.log
+published-images.json
+```
+
+`intended-images.json` exists before builds start and is the cleanup authority
+after partial failure. `published-images.json` contains the completed exact
+references, effective mappings, and mapping-source diagnostics. Cleanup failure
+is a job failure; compare the recorded references with both Podman and Buildah
+image listings.
+
+Parallel image lines are prefixed by target and emitted while builds run. The
+same prefixed lines remain in per-image logs, without a second successful-log
+replay at the end.
 
 ## Registry push fails
 

@@ -1,0 +1,6 @@
+---
+openstack_version:
+  custom_container_images:
+    - watcherAPIImage
+    - watcherApplierImage
+    - watcherDecisionEngineImage
