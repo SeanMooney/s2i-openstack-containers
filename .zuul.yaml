@@ -10,3 +10,48 @@
     name: s2i-openstack-containers-linters
     parent: tox-linters
     description: Run repository formatting and style checks.
+
+- job:
+    name: s2i-openstack-containers-molecule
+    parent: tox
+    description: Run provider registry and cleanup contract scenarios.
+    vars:
+      tox_envlist: molecule
+
+- nodeset:
+    name: s2i-openstack-containers-image-builder
+    nodes:
+      - name: builder
+        label: cloud-centos-10-stream
+
+- job:
+    name: s2i-openstack-container-content-provider
+    parent: base
+    abstract: true
+    description: |
+      Build and publish a maintained subset of OpenStack service container
+      images from committed source pins for dependent jobs.
+
+      The job uses the upstream container repository by default. A child job
+      can add another container repository to ``required-projects`` and select
+      it with ``s2i_ci_container_project``.
+    timeout: 7200
+    nodeset: s2i-openstack-containers-image-builder
+    required-projects:
+      - github.com/openstack-k8s-operators/s2i-openstack-containers
+      - opendev.org/zuul/zuul-jobs
+    pre-run:
+      - playbooks/container-ci/zuul/reset-static-node.yaml
+      - playbooks/container-ci/zuul/pre.yaml
+    run: playbooks/container-ci/zuul/run.yaml
+    post-run: playbooks/container-ci/zuul/post.yaml
+    vars:
+      s2i_ci_container_project: >-
+        github.com/openstack-k8s-operators/s2i-openstack-containers
+      s2i_ci_images:
+        - watcher/watcher-base
+        - cyborg/cyborg
+        - cyborg/cyborg-agent
+      s2i_ci_stream: master
+      s2i_ci_content_provider: true
+      s2i_ci_reset_static_node: false

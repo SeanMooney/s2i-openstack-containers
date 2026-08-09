@@ -83,6 +83,8 @@
 #   PIP_NO_BINARY     If set, passed as --build-arg to buildah so Containerfiles
 #                     can set ENV PIP_NO_BINARY. Use ":all:" to force pip to
 #                     build all packages from source instead of using wheels.
+#   REGISTRY_AUTH_FILE Authentication file passed explicitly to buildah push.
+#   REGISTRY_CERT_DIR  TLS certificate directory passed explicitly to buildah push.
 
 set -euo pipefail
 
@@ -102,6 +104,8 @@ UPSTREAM_CONSTRAINTS="upper-constraints.txt"
 DEFAULT_STREAM="${DEFAULT_STREAM:-master}"
 SKIP_HASH_UPDATE="${SKIP_HASH_UPDATE:-}"
 PIP_NO_BINARY="${PIP_NO_BINARY:-}"
+REGISTRY_AUTH_FILE="${REGISTRY_AUTH_FILE:-}"
+REGISTRY_CERT_DIR="${REGISTRY_CERT_DIR:-}"
 PARALLEL="${PARALLEL:-$(nproc)}"
 
 # Discover all buildable images from the directory structure.
@@ -370,10 +374,33 @@ push_image() {
   name="$(image_name "${dir_name}")"
 
   IFS=',' read -ra tags <<< "${TAG}"
+  local registry_args=()
+  [[ -n "${REGISTRY_AUTH_FILE}" ]] && \
+    registry_args+=(--authfile "${REGISTRY_AUTH_FILE}")
+  [[ -n "${REGISTRY_CERT_DIR}" ]] && \
+    registry_args+=(--cert-dir "${REGISTRY_CERT_DIR}")
+
   for t in "${tags[@]}"; do
     local full_tag="${REGISTRY}/${NAMESPACE}/${name}:${t}"
     echo "=== Pushing ${full_tag} ==="
-    buildah push "${full_tag}"
+    buildah push "${registry_args[@]}" "${full_tag}"
+  done
+}
+
+# Print the exact image references produced for a target.
+target_refs() {
+  local target="$1"
+  local dir_name
+  local name
+  local tag
+  local -a tags
+  resolve_targets_array "${target}" || return 1
+  for dir_name in "${_RESOLVED_TARGETS[@]}"; do
+    name="$(image_name "${dir_name}")"
+    IFS=',' read -ra tags <<< "${TAG}"
+    for tag in "${tags[@]}"; do
+      echo "${REGISTRY}/${NAMESPACE}/${name}:${tag}"
+    done
   done
 }
 
@@ -397,11 +424,51 @@ list_images() {
   fi
 }
 
-# Resolve which images to process
+# Resolve which images to process. A comma-separated expression is an explicit
+# ordered union and includes the base image when it selects a service image.
+# Existing single-image, project, and all expressions retain their behavior.
 resolve_targets() {
   local target="$1"
   local all_images
   all_images=($(discover_images))
+
+  if [[ "${target}" == *,* ]]; then
+    local -a requested
+    local -a resolved=("base")
+    local item
+    local image
+    local item_images
+    local seen_base=0
+    declare -A seen=()
+
+    IFS=',' read -ra requested <<< "${target}"
+    for item in "${requested[@]}"; do
+      if [[ -z "${item}" || "${item}" != "${item//[[:space:]]/}" ]]; then
+        echo "ERROR: Invalid empty or whitespace-containing target '${item}'" >&2
+        return 1
+      fi
+      if ! item_images=$(resolve_targets "${item}"); then
+        return 1
+      fi
+      for image in ${item_images}; do
+        if [[ "${image}" == "base" ]]; then
+          seen_base=1
+          continue
+        fi
+        if [[ -z "${seen[${image}]:-}" ]]; then
+          resolved+=("${image}")
+          seen["${image}"]=1
+        fi
+      done
+    done
+
+    if [[ ${#resolved[@]} -eq 1 && ${seen_base} -eq 0 ]]; then
+      echo "ERROR: Explicit target selection is empty" >&2
+      return 1
+    fi
+    echo "${resolved[@]}"
+    return
+  fi
 
   if [[ "${target}" == "all" ]]; then
     echo "${all_images[@]}"
@@ -435,6 +502,17 @@ resolve_targets() {
     echo "  ${dir_name}" >&2
   done
   return 1
+}
+
+# Resolve an expression without losing failures in command substitutions.
+declare -a _RESOLVED_TARGETS=()
+resolve_targets_array() {
+  local target="$1"
+  local output
+  if ! output=$(resolve_targets "${target}"); then
+    return 1
+  fi
+  _RESOLVED_TARGETS=(${output})
 }
 
 # Clone a repo at a branch tip (or tag) and store the resolved commit hash
@@ -699,7 +777,8 @@ generate_locks_for_targets() {
   fi
 
   local targets
-  targets=($(resolve_targets "${target}"))
+  resolve_targets_array "${target}" || return 1
+  targets=("${_RESOLVED_TARGETS[@]}")
 
   declare -A _lock_projects_seen
   for img in "${targets[@]}"; do
@@ -748,7 +827,8 @@ generate_buildlocks_for_targets() {
   fi
 
   local targets
-  targets=($(resolve_targets "${target}"))
+  resolve_targets_array "${target}" || return 1
+  targets=("${_RESOLVED_TARGETS[@]}")
 
   declare -A _buildlock_projects_seen
   for img in "${targets[@]}"; do
@@ -841,7 +921,8 @@ generate_rpms_in_for_targets() {
   local target="$1"
 
   local targets
-  targets=($(resolve_targets "${target}"))
+  resolve_targets_array "${target}" || return 1
+  targets=("${_RESOLVED_TARGETS[@]}")
 
   declare -A _rpms_projects_seen
   for img in "${targets[@]}"; do
@@ -871,7 +952,8 @@ ensure_sources_for_targets() {
   fi
 
   local targets
-  targets=($(resolve_targets "${target}"))
+  resolve_targets_array "${target}" || return 1
+  targets=("${_RESOLVED_TARGETS[@]}")
 
   declare -A _ensure_projects_seen
 
@@ -910,7 +992,8 @@ update_sources() {
   fi
 
   local targets
-  targets=($(resolve_targets "${target}"))
+  resolve_targets_array "${target}" || return 1
+  targets=("${_RESOLVED_TARGETS[@]}")
 
   declare -A projects_seen
 
@@ -971,17 +1054,32 @@ TARGET="${2:-all}"
 
 case "${ACTION}" in
   build)
-    for img in $(resolve_targets "${TARGET}"); do
+    resolve_targets_array "${TARGET}" || exit 1
+    for img in "${_RESOLVED_TARGETS[@]}"; do
       build_image "${img}"
     done
     ;;
   build-parallel)
-    _bp_targets=($(resolve_targets "${TARGET}"))
+    resolve_targets_array "${TARGET}" || exit 1
+    _bp_targets=("${_RESOLVED_TARGETS[@]}")
+    if [[ ! "${PARALLEL}" =~ ^[1-9][0-9]*$ ]]; then
+      echo "ERROR: PARALLEL must be a positive integer" >&2
+      exit 1
+    fi
+    if [[ -n "${BUILD_LOGS_DIR:-}" ]]; then
+      _bp_logdir="${BUILD_LOGS_DIR}"
+      mkdir -p "${_bp_logdir}"
+    else
+      _bp_logdir=$(mktemp -d)
+    fi
 
     # Build base first (all service images depend on it)
     for _bp_img in "${_bp_targets[@]}"; do
       [[ -n "$(project_name "${_bp_img}")" ]] && continue
-      build_image "${_bp_img}"
+      set -o pipefail
+      build_image "${_bp_img}" 2>&1 |
+        sed -u "s|^|[${_bp_img}] |" |
+        tee "${_bp_logdir}/${_bp_img//\//_}.log"
     done
 
     # Pre-clone sources so parallel builds don't race on the same directories
@@ -991,12 +1089,6 @@ case "${ACTION}" in
     done
 
     # Build service images in parallel (max PARALLEL at a time)
-    if [[ -n "${BUILD_LOGS_DIR:-}" ]]; then
-      _bp_logdir="${BUILD_LOGS_DIR}"
-      mkdir -p "${_bp_logdir}"
-    else
-      _bp_logdir=$(mktemp -d)
-    fi
     _bp_service_imgs=()
     for _bp_img in "${_bp_targets[@]}"; do
       [[ -z "$(project_name "${_bp_img}")" ]] && continue
@@ -1010,47 +1102,50 @@ case "${ACTION}" in
       _bp_running=0
 
       for _bp_img in "${_bp_service_imgs[@]}"; do
-        # Wait for a slot if at the limit
         while [[ ${_bp_running} -ge ${PARALLEL} ]]; do
-          if ! wait -n; then
+          _bp_finished=""
+          if wait -n -p _bp_finished "${!_bp_pids[@]}"; then
+            unset '_bp_pids['"${_bp_finished}"']'
+            ((_bp_running--)) || true
+          else
             _bp_fail=1
+            [[ -n "${_bp_finished}" ]] && unset '_bp_pids['"${_bp_finished}"']'
             break 2
           fi
-          ((_bp_running--)) || true
         done
 
         _bp_log="${_bp_logdir}/${_bp_img//\//_}.log"
-        build_image "${_bp_img}" > "${_bp_log}" 2>&1 &
+        (
+          set -o pipefail
+          build_image "${_bp_img}" 2>&1 |
+            sed -u "s|^|[${_bp_img}] |" |
+            tee "${_bp_log}"
+        ) &
         _bp_pids[$!]="${_bp_img}"
         ((_bp_running++)) || true
       done
 
-      # Wait for remaining builds
       if [[ ${_bp_fail} -eq 0 ]]; then
         while [[ ${_bp_running} -gt 0 ]]; do
-          if ! wait -n; then
+          _bp_finished=""
+          if wait -n -p _bp_finished "${!_bp_pids[@]}"; then
+            unset '_bp_pids['"${_bp_finished}"']'
+            ((_bp_running--)) || true
+          else
             _bp_fail=1
+            [[ -n "${_bp_finished}" ]] && unset '_bp_pids['"${_bp_finished}"']'
             break
           fi
-          ((_bp_running--)) || true
         done
       fi
 
-      # Show logs for all builds
-      for _bp_log in "${_bp_logdir}"/*.log; do
-        _bp_name=$(basename "${_bp_log}" .log)
-        echo "=== ${_bp_name} ==="
-        cat "${_bp_log}"
-        echo ""
-      done
-
       if [[ ${_bp_fail} -eq 1 ]]; then
-        echo "ERROR: A build failed, killing remaining builds" >&2
+        echo "ERROR: A build failed; stopping remaining builds" >&2
         for _bp_pid in "${!_bp_pids[@]}"; do
           kill "${_bp_pid}" 2>/dev/null || true
         done
         wait 2>/dev/null || true
-        [[ -z "${BUILD_LOGS_DIR:-}" ]] && rm -rf "${_bp_logdir}"
+        echo "Build logs are available in ${_bp_logdir}" >&2
         exit 1
       fi
 
@@ -1059,7 +1154,8 @@ case "${ACTION}" in
     fi
     ;;
   push)
-    _push_targets=($(resolve_targets "${TARGET}"))
+    resolve_targets_array "${TARGET}" || exit 1
+    _push_targets=("${_RESOLVED_TARGETS[@]}")
 
     # Verify all images and tags exist before pushing any
     echo "--- Verifying all images exist locally ---"
@@ -1071,6 +1167,9 @@ case "${ACTION}" in
     for img in "${_push_targets[@]}"; do
       push_image "${img}"
     done
+    ;;
+  refs)
+    target_refs "${TARGET}"
     ;;
   update-sources)
     if [[ -n "${SKIP_HASH_UPDATE}" ]]; then
@@ -1097,7 +1196,8 @@ case "${ACTION}" in
     if [[ "${STREAM}" == "${DEFAULT_STREAM}" ]]; then
       echo ""
       echo "=== Creating default stream symlinks (${DEFAULT_STREAM}) ==="
-      _symlink_targets=($(resolve_targets "${TARGET}"))
+      resolve_targets_array "${TARGET}" || exit 1
+      _symlink_targets=("${_RESOLVED_TARGETS[@]}")
       declare -A _symlink_seen
       for _s_img in "${_symlink_targets[@]}"; do
         _s_project="$(project_name "${_s_img}")"
@@ -1141,7 +1241,7 @@ case "${ACTION}" in
     list_images
     ;;
   *)
-    echo "Usage: STREAM=<name> $0 {build|build-parallel|push|update-sources|install-deps|list} [image-name|all]"
+    echo "Usage: STREAM=<name> $0 {build|build-parallel|push|refs|update-sources|install-deps|list} [image-name|all]"
     echo ""
     echo "Images (discovered from containers/):"
     for dir_name in $(discover_images); do
@@ -1165,6 +1265,8 @@ case "${ACTION}" in
     echo "  BUILD_LOGS_DIR    Persist build-parallel logs to this directory"
     echo "  SKIP_HASH_UPDATE  Skip updating pinned hashes; regenerate locks only"
     echo "  PIP_NO_BINARY     Pass PIP_NO_BINARY to container build (e.g., ':all:')"
+    echo "  REGISTRY_AUTH_FILE  Registry authentication file for pushes"
+    echo "  REGISTRY_CERT_DIR   Registry TLS certificate directory for pushes"
     echo ""
     echo "Source directories: containers/<project>/src/<name>/"
     echo "Overrides:          containers/<project>/src/overrides/<pkg>/"

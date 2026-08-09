@@ -1,0 +1,16 @@
+---
+- name: Reject duplicate deployment keys
+  hosts: builder
+  gather_facts: false
+  vars:
+    s2i_test_repo_root: "{{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') }}"
+    s2i_ci_effective_image_mappings:
+      base:
+        - duplicateImage
+      watcher/watcher-base:
+        - duplicateImage
+
+  tasks:
+    - name: Validate duplicate fixture
+      ansible.builtin.include_tasks: >-
+        {{ s2i_test_repo_root }}/playbooks/container-ci/shared/validate-deployment-keys.yaml

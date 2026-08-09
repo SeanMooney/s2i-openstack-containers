@@ -1,0 +1,17 @@
+---
+- name: Reject unknown mapping target
+  hosts: builder
+  gather_facts: false
+  vars:
+    s2i_test_repo_root: "{{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') }}"
+    s2i_ci_selected_images:
+      - base
+      - watcher/watcher-base
+    s2i_ci_image_mappings:
+      cyborg/cyborg:
+        - unknownImage
+
+  tasks:
+    - name: Validate unknown mapping fixture
+      ansible.builtin.include_tasks: >-
+        {{ s2i_test_repo_root }}/playbooks/container-ci/shared/validate-mapping-overrides.yaml

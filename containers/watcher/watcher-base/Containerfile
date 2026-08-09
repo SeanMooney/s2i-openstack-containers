@@ -72,8 +72,8 @@ RUN mkdir -p /configfiles/etc/watcher && \
 # --- Runtime stage ---
 FROM ${BASE_IMAGE}
 
-LABEL summary="OpenStack Watcher API" \
-      io.k8s.description="Watcher API service (WSGI via httpd) built from source with kolla interface"
+LABEL summary="OpenStack Watcher services" \
+      io.k8s.description="Consolidated Watcher API, applier, and decision-engine image built from source with the Kolla interface"
 
 RUN uid_gid_manage watcher
 
@@ -103,7 +103,7 @@ COPY --from=build /configfiles/etc/watcher/watcher.conf /etc/watcher/watcher.con
 RUN chmod 640 /etc/watcher/watcher.conf && \
     chown watcher:watcher /etc/watcher/watcher.conf
 
-# Apache httpd setup for WSGI
+# Apache httpd setup for the API process in the consolidated image
 RUN sed -i -r 's,^(Listen 80),#\1,' /etc/httpd/conf/httpd.conf && \
     sed -i -r 's,^(Listen 443),#\1,' /etc/httpd/conf.d/ssl.conf 2>/dev/null || true && \
     usermod --append --groups apache watcher

@@ -89,6 +89,7 @@ class UpdateSourcesTest(unittest.TestCase):
             ["git", "config", "user.email", "test@example.com"], work
         )
         self.run_command(["git", "config", "user.name", "Test"], work)
+        self.run_command(["git", "config", "commit.gpgsign", "false"], work)
         hashes = []
         for index, files in enumerate(commits, start=1):
             for name, content in files.items():

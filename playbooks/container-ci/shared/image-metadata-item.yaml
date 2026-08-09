@@ -1,0 +1,68 @@
+---
+- name: Check selected image files
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ s2i_ci_container_repo }}/containers/{{ s2i_ci_image }}/Containerfile"
+    - "{{ s2i_ci_container_repo }}/containers/{{ s2i_ci_image }}/image.yaml"
+  register: s2i_ci_image_files
+
+- name: Require selected image files
+  ansible.builtin.assert:
+    that:
+      - s2i_ci_image_files.results | map(attribute='stat.exists') |
+          select('equalto', false) | list | length == 0
+      - s2i_ci_image_files.results | map(attribute='stat.isreg') |
+          select('equalto', false) | list | length == 0
+    fail_msg: >-
+      Selected image {{ s2i_ci_image }} requires Containerfile and image.yaml
+
+- name: Read tracked image metadata
+  ansible.builtin.slurp:
+    src: "{{ s2i_ci_container_repo }}/containers/{{ s2i_ci_image }}/image.yaml"
+  register: s2i_ci_image_metadata_data
+
+- name: Decode tracked image metadata
+  ansible.builtin.set_fact:
+    s2i_ci_image_metadata: >-
+      {{ s2i_ci_image_metadata_data.content | b64decode | from_yaml }}
+
+- name: Validate tracked image metadata schema
+  ansible.builtin.assert:
+    that:
+      - s2i_ci_image_metadata is mapping
+      - s2i_ci_image_metadata.openstack_version is mapping
+      - s2i_ci_image_metadata.openstack_version.custom_container_images is sequence
+      - s2i_ci_image_metadata.openstack_version.custom_container_images is not string
+    fail_msg: "Malformed image metadata for {{ s2i_ci_image }}"
+
+- name: Select effective image deployment keys
+  ansible.builtin.set_fact:
+    s2i_ci_effective_image_keys: >-
+      {{ s2i_ci_image_mappings[s2i_ci_image]
+         if s2i_ci_image in s2i_ci_image_mappings
+         else s2i_ci_image_metadata.openstack_version.custom_container_images }}
+    s2i_ci_effective_mapping_source: >-
+      {{ 'inventory' if s2i_ci_image in s2i_ci_image_mappings else 'tracked' }}
+
+- name: Validate effective image deployment keys
+  ansible.builtin.assert:
+    that:
+      - s2i_ci_effective_image_keys is sequence
+      - s2i_ci_effective_image_keys is not string
+      - s2i_ci_effective_image_keys | select('string') | list | length ==
+          s2i_ci_effective_image_keys | length
+      - s2i_ci_effective_image_keys |
+          reject('match', '^[A-Za-z][A-Za-z0-9]*$') | list | length == 0
+      - s2i_ci_effective_image_keys | unique | list | length ==
+          s2i_ci_effective_image_keys | length
+    fail_msg: "Invalid effective image mapping for {{ s2i_ci_image }}"
+
+- name: Record effective image metadata
+  ansible.builtin.set_fact:
+    s2i_ci_effective_image_mappings: >-
+      {{ s2i_ci_effective_image_mappings |
+         combine({s2i_ci_image: s2i_ci_effective_image_keys | list}) }}
+    s2i_ci_mapping_sources: >-
+      {{ s2i_ci_mapping_sources |
+         combine({s2i_ci_image: s2i_ci_effective_mapping_source}) }}
