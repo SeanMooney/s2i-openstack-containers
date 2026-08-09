@@ -98,6 +98,7 @@ class ProviderArchitectureTest(unittest.TestCase):
         self.assertTrue(
             {
                 "prepare-host.yaml",
+                "prepare-sources.yaml",
                 "validate-registry.yaml",
                 "run.yaml",
                 "cleanup-images.yaml",
@@ -122,9 +123,6 @@ class ProviderArchitectureTest(unittest.TestCase):
             5,
             zuul.count("nodeset: s2i-openstack-containers-image-builder"),
         )
-        self.assertIn("- watcher/watcher-base", zuul)
-        self.assertIn("- cyborg/cyborg", zuul)
-        self.assertIn("- cyborg/cyborg-agent", zuul)
         self.assertNotIn("- project:", zuul)
         self.assertNotIn("abstract: true", zuul)
 
@@ -177,6 +175,23 @@ class ProviderArchitectureTest(unittest.TestCase):
             "s2i_ci_content_provider | default(false) | bool", zuul_run
         )
 
+    def test_c3_planner_and_staging_ownership_is_explicit(self):
+        staging = self._read(
+            "playbooks/container-ci/shared/prepare-sources.yaml"
+        )
+        run = self._read("playbooks/container-ci/shared/run.yaml")
+        zuul_run = self._read("playbooks/container-ci/zuul/run.yaml")
+
+        self.assertIn("installed side-effect-free OIB planner", staging)
+        self.assertIn("source-placements.json", staging)
+        self.assertIn("build-contexts.json", staging)
+        self.assertIn("Atomically activate assembled contexts", staging)
+        self.assertIn("../shared/prepare-sources.yaml", zuul_run)
+        self.assertNotIn("image-metadata-item.yaml", run)
+        self.assertNotIn("validate-mapping-overrides.yaml", run)
+        self.assertIn('S2I_CONTEXTS_ROOT: "{{ s2i_ci_contexts_root }}"', run)
+        self.assertIn('ERROR_ON_CLONE: "1"', run)
+
     def test_return_contract_is_selective_and_secret_free(self):
         returned = self._read(
             "playbooks/container-ci/zuul/content-provider-return.yaml"
@@ -226,15 +241,22 @@ class ProviderArchitectureTest(unittest.TestCase):
             }.issubset(bindeps)
         )
 
-    def test_c2_has_no_oib_or_local_adapter(self):
-        self.assertFalse((self.repo_root / "openstack_image_builder").exists())
+    def test_c3_has_planner_without_local_adapter(self):
+        planner = self.repo_root / "openstack_image_builder"
+
+        self.assertTrue(planner.is_dir())
+        self.assertFalse((planner / "local").exists())
         self.assertFalse((self.container_ci / "local").exists())
-        all_content = "\n".join(
-            path.read_text(encoding="utf-8")
-            for path in self.container_ci.glob("**/*.yaml")
+        planner_content = "\n".join(
+            path.read_text(encoding="utf-8") for path in planner.glob("*.py")
         )
-        for forbidden in ("S2I_CONTEXTS_ROOT", "ERROR_ON_CLONE", "oib"):
-            self.assertNotIn(forbidden, all_content)
+        for forbidden in (
+            "shutil.copy",
+            "subprocess",
+            "buildah",
+            "ansible-playbook",
+        ):
+            self.assertNotIn(forbidden, planner_content)
 
 
 if __name__ == "__main__":

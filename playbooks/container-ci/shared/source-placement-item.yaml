@@ -1,0 +1,117 @@
+---
+- name: Resolve planned source paths
+  ansible.builtin.set_fact:
+    s2i_ci_source_repository: >-
+      {{ s2i_ci_workspace_root }}/{{ s2i_ci_planned_source.src_dir }}
+    s2i_ci_source_destination: >-
+      {{ s2i_ci_contexts_assembly }}/{{ s2i_ci_planned_source.destination }}
+
+- name: Inspect prepared source checkout
+  ansible.builtin.stat:
+    path: "{{ s2i_ci_source_repository }}/.git"
+  register: s2i_ci_source_checkout
+
+- name: Inspect planned source content
+  ansible.builtin.stat:
+    path: >-
+      {{ s2i_ci_source_repository }}/{{ s2i_ci_planned_source.source_file }}
+  register: s2i_ci_source_content
+
+- name: Canonicalize prepared source checkout
+  ansible.builtin.command:
+    argv:
+      - realpath
+      - --canonicalize-existing
+      - "{{ s2i_ci_source_repository }}"
+  register: s2i_ci_source_repository_realpath
+  changed_when: false
+  failed_when: false
+
+- name: Require safe prepared source content
+  ansible.builtin.assert:
+    that:
+      - s2i_ci_source_checkout.stat.isdir | default(false)
+      - s2i_ci_source_content.stat.exists | default(false)
+      - s2i_ci_source_repository_realpath.rc == 0
+      - s2i_ci_source_repository_realpath.stdout.startswith(
+          s2i_ci_workspace_root_realpath.stdout + '/')
+    fail_msg: >-
+      Prepared source is missing or unsafe:
+      {{ s2i_ci_planned_source.canonical_name }}
+
+- name: Record authoritative prepared checkout HEAD
+  ansible.builtin.command:
+    argv:
+      - git
+      - -C
+      - "{{ s2i_ci_source_repository }}"
+      - rev-parse
+      - HEAD
+  register: s2i_ci_source_head
+  changed_when: false
+
+- name: Create planned source destination parent
+  ansible.builtin.file:
+    path: "{{ s2i_ci_source_destination | dirname }}"
+    state: directory
+    mode: "0755"
+
+- name: Copy prepared repository content
+  when: s2i_ci_planned_source.type == 'repository'
+  ansible.builtin.command:
+    argv:
+      - cp
+      - --archive
+      - --reflink=auto
+      - "{{ s2i_ci_source_repository }}/."
+      - "{{ s2i_ci_source_destination }}/"
+  changed_when: true
+
+- name: Remove copied generated repository state
+  when: s2i_ci_planned_source.type == 'repository'
+  ansible.builtin.file:
+    path: "{{ s2i_ci_source_destination }}/{{ item }}"
+    state: absent
+  loop:
+    - .tmp
+    - .tox
+    - .venv
+    - __pycache__
+
+- name: Copy prepared constraints content
+  when: s2i_ci_planned_source.type == 'constraints'
+  ansible.builtin.copy:
+    src: >-
+      {{ s2i_ci_source_repository }}/{{ s2i_ci_planned_source.source_file }}
+    dest: "{{ s2i_ci_source_destination }}"
+    remote_src: true
+    mode: "0644"
+
+- name: Canonicalize staged source destination
+  ansible.builtin.command:
+    argv:
+      - realpath
+      - --canonicalize-existing
+      - "{{ s2i_ci_source_destination }}"
+  register: s2i_ci_source_destination_realpath
+  changed_when: false
+  failed_when: false
+
+- name: Require safe staged source destination
+  ansible.builtin.assert:
+    that:
+      - s2i_ci_source_destination_realpath.rc == 0
+      - s2i_ci_source_destination_realpath.stdout.startswith(
+          s2i_ci_contexts_assembly_realpath.stdout + '/')
+
+- name: Record observed source placement
+  ansible.builtin.set_fact:
+    s2i_ci_source_placements: >-
+      {{ s2i_ci_source_placements +
+         [s2i_ci_planned_source |
+          combine({
+            'actual_commit': s2i_ci_source_head.stdout,
+            'workspace_source': s2i_ci_source_repository_realpath.stdout,
+            'destination':
+              '.tmp/build-contexts/' + s2i_ci_planned_source.destination
+          })] }}

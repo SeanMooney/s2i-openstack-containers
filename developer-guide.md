@@ -42,6 +42,7 @@ The current image set is:
 base                       openstack-base
 cyborg/cyborg              openstack-cyborg
 cyborg/cyborg-agent        openstack-cyborg-agent
+glance/glance-api          openstack-glance-api
 watcher/watcher-base       openstack-watcher-base
 ```
 
@@ -54,8 +55,8 @@ resulting images.
 Konflux owns hermetic production provenance and publication. Treat its recorded
 inputs and outputs as authoritative for production images.
 
-The GitHub and Zuul workflows have narrower development roles. The abstract
-Zuul content-provider job publishes selected speculative images only to its
+The GitHub and Zuul workflows have narrower development roles. The Zuul
+content-provider job publishes selected speculative images only to its
 ephemeral buildset registry; it is not a production publication lane.
 
 The GitHub workflows have these roles:
@@ -383,25 +384,48 @@ change Konflux's production authority.
 
 ## Selective Zuul content provider
 
-The abstract `s2i-openstack-container-content-provider` job runs on the
+The `s2i-openstack-container-content-provider` job runs on the
 CentOS Stream 10 nodeset host named `builder`. All host preparation, registry
 validation, builds, publication, result generation, and cleanup target that
 host explicitly. The Zuul executor controls Ansible but does not perform those
 mutations.
 
-The provider defaults to this explicit set:
+The provider accepts an explicit image list whose source repositories are
+available through the job's `required-projects`. The job definition is the
+source of truth for those concrete inputs, and child jobs may supply a different
+compatible set. `build.sh` automatically places `base` first for the resulting
+comma-separated selection. Existing single-image, project, and `all` shell
+targets keep their standalone behavior.
 
-```text
-watcher/watcher-base
-cyborg/cyborg
-cyborg/cyborg-agent
-```
+### Planning and speculative source staging
 
-`build.sh` automatically places `base` first for this comma-separated explicit
-selection. Existing single-image, project, and `all` shell targets keep their
-standalone behavior. The provider uses normal `build.sh` source handling, so it
-builds service content from the exact maintained `sources.txt` pins. It does
-not consume speculative service checkouts at this stage.
+The installed `oib plan` command is a side-effect-free planning boundary. It
+reads the explicit image list, `sources.txt`, mandatory `image.yaml` files,
+optional inventory mappings, and `zuul.projects`. Its atomic JSON output records
+ordered images, context scopes, deployment keys, source destinations, declared
+refs and maintained pins, inventory commits, and the
+`zuul-prepared-workspace-head` authority reason. It does not fetch Git objects,
+copy repositories, assemble contexts, invoke Ansible or Buildah, publish
+images, or perform cleanup.
+
+Zuul prepares every repository declared by the job's `required-projects` in its
+standard workspace. The shared run playbook resolves those checkouts on
+`builder`, records their actual HEADs, and leaves the prepared
+repositories unchanged. It copies maintained context skeletons and source
+content into isolated `.tmp/build-contexts/<scope>` trees, records separate
+source-placement and context-assembly manifests, and activates a complete
+context tree atomically.
+
+The provider invokes `build.sh` with `S2I_CONTEXTS_ROOT` pointing at those
+contexts and `ERROR_ON_CLONE=1`. Consequently, missing speculative service
+source or prepared context content fails instead of falling back to network
+acquisition. The context keeps each committed filtered
+`requirements.lock.<stream>` as the build constraint input. The prepared
+`requirements` HEAD and its upper-constraints file are validated, staged, and
+recorded, but dependency-aware filtering against that checkout belongs to the
+separate transitive-constraint workflow. Direct contributor and GitHub shell
+builds without `S2I_CONTEXTS_ROOT` retain maintained-pin cloning as an
+independent compatibility path.
 
 ### Image deployment metadata
 
@@ -431,7 +455,8 @@ process-specific images.
 
 Both Cyborg images build and publish, but their tracked key lists are empty.
 Their exact references therefore appear in provider diagnostics without adding
-fields to the default deployment map.
+fields to the default deployment map. When selected, the Glance API image maps
+to `glanceAPIImage`.
 
 A child job may provide `s2i_ci_image_mappings` as a mapping from a selected
 image target to a replacement list of keys. Replacement is per image rather
@@ -584,6 +609,15 @@ tox -e unit -- -k test_name_pattern
 
 Tests use temporary directories and local bare Git remotes so they do not
 change a contributor's source checkouts or container storage.
+
+Exercise the installed planning command with:
+
+```console
+tox -e oib-plan -- --help
+```
+
+The planner environment installs the project wheel. It exposes planning only;
+source staging and context assembly remain Ansible responsibilities.
 
 ## Formatting and static analysis
 

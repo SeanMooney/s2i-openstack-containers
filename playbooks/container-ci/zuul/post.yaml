@@ -29,6 +29,59 @@
 - name: Remove exact workflow images
   ansible.builtin.import_playbook: ../shared/cleanup-images.yaml
 
+- name: Remove isolated source-planning state
+  hosts: builder
+  gather_facts: false
+  vars:
+    s2i_ci_workspace_root: "{{ zuul_user_dir | default(ansible_user_dir) }}"
+
+  tasks:
+    - name: Resolve the inventory-described container repository
+      when:
+        - zuul is mapping
+        - zuul.projects is mapping
+        - s2i_ci_container_project in zuul.projects
+      ansible.builtin.set_fact:
+        s2i_ci_container_repo: >-
+          {{ s2i_ci_workspace_root }}/{{
+             zuul.projects[s2i_ci_container_project].src_dir }}
+
+    - name: Canonicalize workspace root for planning cleanup
+      ansible.builtin.command:
+        argv:
+          - realpath
+          - --canonicalize-existing
+          - "{{ s2i_ci_workspace_root }}"
+      register: s2i_ci_cleanup_workspace_realpath
+      changed_when: false
+      failed_when: false
+
+    - name: Canonicalize container repository for planning cleanup
+      when: s2i_ci_container_repo is defined
+      ansible.builtin.command:
+        argv:
+          - realpath
+          - --canonicalize-existing
+          - "{{ s2i_ci_container_repo }}"
+      register: s2i_ci_cleanup_repo_realpath
+      changed_when: false
+      failed_when: false
+
+    - name: Require safe source-planning cleanup path
+      when: s2i_ci_container_repo is defined
+      ansible.builtin.assert:
+        that:
+          - s2i_ci_cleanup_workspace_realpath.rc == 0
+          - s2i_ci_cleanup_repo_realpath.rc == 0
+          - s2i_ci_cleanup_repo_realpath.stdout.startswith(
+              s2i_ci_cleanup_workspace_realpath.stdout + '/')
+
+    - name: Remove source-planning repository state
+      when: s2i_ci_container_repo is defined
+      ansible.builtin.file:
+        path: "{{ s2i_ci_container_repo }}/.tmp"
+        state: absent
+
 - name: Remove the project-owned Zuul buildset registry
   hosts: builder
   gather_facts: false

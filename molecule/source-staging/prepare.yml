@@ -1,0 +1,67 @@
+---
+- name: Prepare speculative source staging fixtures
+  hosts: builder
+  gather_facts: false
+  vars:
+    s2i_test_repo_root: "{{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') }}"
+    s2i_test_root: "{{ s2i_test_repo_root }}/.tmp/molecule/source-staging"
+    s2i_test_workspace: "{{ s2i_test_root }}/workspace"
+
+  tasks:
+    - name: Reset source staging fixture state
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ s2i_test_root }}"
+        - "{{ s2i_test_repo_root }}/.tmp/build-contexts"
+        - "{{ s2i_test_repo_root }}/.tmp/.build-contexts.new"
+        - "{{ s2i_test_repo_root }}/.tmp/.build-contexts.previous"
+
+    - name: Create fake prepared checkout directories
+      ansible.builtin.file:
+        path: "{{ s2i_test_workspace }}/{{ item }}/.git"
+        state: directory
+        mode: "0755"
+      loop:
+        - opendev.org/openstack/requirements
+        - opendev.org/openstack/watcher
+        - opendev.org/openstack/cyborg
+        - opendev.org/openstack/glance
+
+    - name: Create fake command directory
+      ansible.builtin.file:
+        path: "{{ s2i_test_root }}/bin"
+        state: directory
+        mode: "0755"
+
+    - name: Install fake Git HEAD reader
+      ansible.builtin.copy:
+        dest: "{{ s2i_test_root }}/bin/git"
+        mode: "0755"
+        content: |
+          #!/usr/bin/env python3
+          import pathlib
+          import sys
+
+          repository = pathlib.Path(sys.argv[sys.argv.index("-C") + 1])
+          print(f"{repository.name}-actual-head")
+
+    - name: Write prepared requirements content
+      ansible.builtin.copy:
+        dest: >-
+          {{ s2i_test_workspace }}/opendev.org/openstack/requirements/upper-constraints.txt
+        mode: "0644"
+        content: |
+          pbr===7.0.3
+
+    - name: Write prepared service content
+      ansible.builtin.copy:
+        dest: >-
+          {{ s2i_test_workspace }}/opendev.org/openstack/{{ item }}/fixture.txt
+        mode: "0644"
+        content: "{{ item }} speculative content\n"
+      loop:
+        - watcher
+        - cyborg
+        - glance
