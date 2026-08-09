@@ -30,13 +30,16 @@ class ReproducibilityArchitectureTest(unittest.TestCase):
         self.assertIn(
             "name: s2i-openstack-containers-update-sources", configuration
         )
-        self.assertEqual(3, configuration.count('python_version: "3.12"'))
-        self.assertNotIn("pre-run:", configuration)
+        self.assertEqual(4, configuration.count('python_version: "3.12"'))
+        update_job = configuration.split(
+            "name: s2i-openstack-containers-update-sources", 1
+        )[1].split("\n- job:", 1)[0]
+        self.assertNotIn("pre-run:", update_job)
         self.assertIn(
             "post-run: playbooks/testing/update-sources-diff.yaml",
-            configuration,
+            update_job,
         )
-        self.assertIn('SKIP_HASH_UPDATE: "1"', configuration)
+        self.assertIn('SKIP_HASH_UPDATE: "1"', update_job)
         self.assertNotIn("- project:", configuration)
         self.assertFalse(
             (

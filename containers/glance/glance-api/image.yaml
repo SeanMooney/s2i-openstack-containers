@@ -1,0 +1,4 @@
+---
+openstack_version:
+  custom_container_images:
+    - glanceAPIImage

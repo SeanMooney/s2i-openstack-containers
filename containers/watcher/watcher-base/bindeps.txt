@@ -1,7 +1,12 @@
-# Apache WSGI server for watcher-api
+# API WSGI runtime
 httpd
 mod_ssl
 python3-mod_wsgi
+# Shared Watcher API, applier, and decision-engine runtime
 python3
 python3-pip
 python3-cryptography
+libffi
+libxml2
+libxslt
+openssl-libs

@@ -1,0 +1,32 @@
+---
+- name: Return selective image metadata and pause the provider
+  zuul_return:
+    data:
+      zuul:
+        pause: true
+      s2i_ci_content:
+        registry: "{{ s2i_ci_public_registry_endpoint }}"
+        registry_host: "{{ s2i_ci_registry.public_host }}"
+        registry_port: "{{ s2i_ci_registry.public_port }}"
+        namespace: "{{ s2i_ci_namespace }}"
+        tag: "{{ s2i_ci_tag }}"
+        target: "{{ s2i_ci_target_expression }}"
+        stream: "{{ s2i_ci_stream }}"
+        selected_images: "{{ s2i_ci_selected_images }}"
+        images: "{{ s2i_ci_published_images }}"
+        image_mappings: "{{ s2i_ci_effective_image_mappings }}"
+        mapping_sources: "{{ s2i_ci_mapping_sources }}"
+        custom_container_images: "{{ s2i_ci_custom_container_images }}"
+      content_provider_os_custom_container_images: >-
+        {{ s2i_ci_custom_container_images }}
+      content_provider_os_registry_url: "null"
+      content_provider_os_registry_namespace: ""
+      content_provider_os_registry_tag: ""
+      content_provider_dlrn_md5_hash: ""
+      content_provider_gating_repo_available: false
+      content_provider_gating_repo_url: ""
+      content_provider_registry_available: true
+      content_provider_registry_ip: "{{ s2i_ci_registry.public_host }}"
+      content_provider_registry_ip_port: >-
+        {{ s2i_ci_public_registry_endpoint }}
+      cifmw_build_images_output: {}

@@ -1,0 +1,86 @@
+---
+- name: Reset temporary state on a reused static build node
+  hosts: builder
+  gather_facts: false
+  vars:
+    s2i_ci_reset_static_node: false
+    s2i_ci_workspace_root: "{{ zuul_user_dir | default(ansible_user_dir) }}"
+    s2i_ci_registry_root: "{{ ansible_user_dir }}/buildset_registry"
+    s2i_ci_output_dir: "{{ ansible_user_dir }}/zuul-output"
+    s2i_ci_registry_port: 5000
+    s2i_ci_validation_repository: s2i-validation/ubi10-minimal:latest
+
+  tasks:
+    - name: Resolve the inventory-described container repository
+      when: s2i_ci_reset_static_node | bool
+      ansible.builtin.set_fact:
+        s2i_ci_container_repo: >-
+          {{ s2i_ci_workspace_root }}/{{ zuul.projects[s2i_ci_container_project].src_dir }}
+
+    - name: Require safe static-node cleanup boundaries
+      when: s2i_ci_reset_static_node | bool
+      ansible.builtin.assert:
+        that:
+          - s2i_ci_registry_root == ansible_user_dir + '/buildset_registry'
+          - s2i_ci_output_dir == ansible_user_dir + '/zuul-output'
+          - (s2i_ci_container_repo | realpath).startswith((s2i_ci_workspace_root | realpath) + '/')
+          - s2i_ci_container_repo != s2i_ci_workspace_root
+        fail_msg: Static-node cleanup is restricted to job-owned paths
+
+    - name: Remove a stale buildset registry container
+      when: s2i_ci_reset_static_node | bool
+      ansible.builtin.command:
+        argv:
+          - podman
+          - rm
+          - --force
+          - "{{ 'buildset_registry' if s2i_ci_registry_port | int == 5000 else 'buildset_registry_' + s2i_ci_registry_port | string }}"
+      register: s2i_ci_stale_registry
+      changed_when: s2i_ci_stale_registry.rc == 0
+      failed_when: s2i_ci_stale_registry.rc not in [0, 1]
+
+    - name: Stop a stale buildset registry tunnel
+      when: s2i_ci_reset_static_node | bool
+      ansible.builtin.shell: |
+        pids=$(pgrep -f '^socat -d -d TCP6-LISTEN:{{ s2i_ci_registry_port }},fork TCP:127.0.0.1:1{{ s2i_ci_registry_port }}$' || true)
+        if [ -n "$pids" ]; then
+          printf '%s\n' "$pids"
+          kill $pids
+        fi
+      args:
+        executable: /bin/bash
+      register: s2i_ci_stale_registry_tunnel
+      changed_when: s2i_ci_stale_registry_tunnel.stdout | length > 0
+
+    - name: Remove the stale registry validation tag
+      when: s2i_ci_reset_static_node | bool
+      ansible.builtin.command:
+        argv:
+          - podman
+          - image
+          - rm
+          - --force
+          - "zuul-jobs.buildset-registry:{{ s2i_ci_registry_port }}/{{ s2i_ci_validation_repository }}"
+      register: s2i_ci_stale_validation_image
+      changed_when: s2i_ci_stale_validation_image.rc == 0
+      failed_when: s2i_ci_stale_validation_image.rc not in [0, 1]
+
+    - name: Remove interrupted Buildah working containers
+      when: s2i_ci_reset_static_node | bool
+      ansible.builtin.command:
+        argv:
+          - buildah
+          - rm
+          - --all
+      register: s2i_ci_stale_buildah_containers
+      changed_when: s2i_ci_stale_buildah_containers.stdout | length > 0
+
+    - name: Remove stale job-owned directories
+      when: s2i_ci_reset_static_node | bool
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ s2i_ci_registry_root }}"
+        - "{{ s2i_ci_output_dir }}"
+        - "{{ s2i_ci_container_repo }}/.tmp"
