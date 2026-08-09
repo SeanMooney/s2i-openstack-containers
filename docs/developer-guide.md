@@ -42,6 +42,10 @@ The current image set is:
 base                       openstack-base
 cyborg/cyborg              openstack-cyborg
 cyborg/cyborg-agent        openstack-cyborg-agent
+glance/glance-api          openstack-glance-api
+manila/manila-api          openstack-manila-api
+manila/manila-scheduler    openstack-manila-scheduler
+manila/manila-share        openstack-manila-share
 watcher/watcher-base       openstack-watcher-base
 ```
 
@@ -54,7 +58,11 @@ resulting images.
 Konflux owns hermetic production provenance and publication. Treat its recorded
 inputs and outputs as authoritative for production images.
 
-The GitHub workflows have narrower roles:
+The GitHub and Zuul workflows have narrower development roles. The Zuul
+content-provider job publishes images only to its ephemeral buildset registry;
+it is not a production publication lane.
+
+The GitHub workflows have these roles:
 
 - `build.yml` builds images for pull requests and manual runs.
 - `test.yml` runs tests and verifies source regeneration.
@@ -71,15 +79,18 @@ hermetic production provenance and do not replace its production authority.
 ```text
 README.md                    short project entry point
 
-developer-guide.md           contributor architecture and workflow reference
-TESTING.md                   concise compatibility testing entry point
+docs/developer-guide.md      contributor architecture and workflow reference
+docs/TESTING.md              concise compatibility testing entry point
 build.sh                     build, push, and source-maintenance implementation
 tox.ini                      dependency-managed contributor commands
 pyproject.toml               Python lint and format configuration
 .pre-commit-config.yaml      repository-wide quality checks
 .ansible-lint                Ansible lint policy
-zuul.d/jobs.yaml             reusable unit and linter job definitions
+zuul.d/jobs.yaml             reusable test and content-provider jobs
+zuul.d/projects.yaml         upstream project pipeline configuration
 .github/workflows/           GitHub development automation
+playbooks/container-ci/      shared builder and Zuul adapter playbooks
+containers/image-mappings.yaml  OpenStackVersion deployment key mappings
 containers/base/             common UBI-based runtime image
 containers/cyborg/           Cyborg source and image contexts
 containers/watcher/          Watcher source and image context
@@ -136,6 +147,15 @@ containers/<project>/
 : A tracked file produced by `build.sh update-sources`, such as a lock file,
   constraints snapshot, RPM input file, or default-stream symlink.
 
+**Content provider**
+: A paused Zuul job that builds and publishes selected images to the buildset's
+  ephemeral registry, then returns exact references to dependent jobs.
+
+**Deployment key**
+: An OpenStackVersion custom-container-image field associated with a build
+  target in `containers/image-mappings.yaml`. The provider expands that field
+  to the image's exact successful buildset reference.
+
 # Part II - Preparing and Building
 
 ## Host prerequisites
@@ -155,6 +175,9 @@ not configure registry credentials or alter source pins.
 
 Tox manages Python test and generation dependencies. Use the repository's tox
 environments rather than installing those packages into the system Python.
+Dependency generation requires Python 3.12; tox enforces that invariant. GitHub
+Actions selects Python 3.12 explicitly and installs tox with `python3 -m pip`,
+which remains reliable when a standalone `pip` or `pip3` executable is absent.
 
 ## Quick start: inspect targets
 
@@ -365,6 +388,89 @@ The push operation verifies that every expected local tag exists before it
 pushes any target. This command is an explicit contributor action. It does not
 change Konflux's production authority.
 
+## Zuul content provider
+
+The `s2i-openstack-container-content-provider` job runs on the
+CentOS Stream 10 nodeset host named `builder`. All host preparation, registry
+validation, builds, publication, result generation, and cleanup target that
+host explicitly. The Zuul executor controls Ansible but does not perform those
+mutations.
+
+In this repository the provider defaults to `all`, so every maintained image
+is built from its exact `sources.txt` pins. A child job can set `s2i_ci_images`
+to an explicit list of image targets; the provider adds `base`, resolves the
+selection through `build.sh`, and publishes only that set.
+
+To compose the provider in an operator repository, inherit the job, add the
+container repository and any related repositories to `required-projects`, set
+`s2i_ci_container_project`, and override `s2i_ci_images` with the required
+subset. Zuul places those projects in the shared buildset workspace, but this
+provider does not yet consume speculative service checkouts or build operators.
+Those integrations remain follow-up scope; the current provider always uses
+maintained source pins.
+
+### Image deployment metadata
+
+The repository-level `containers/image-mappings.yaml` associates exact build
+targets with OpenStackVersion custom-image fields. Unlisted targets have no
+deployment mapping but are still built and returned. The consolidated
+`watcher/watcher-base` image declares:
+
+```yaml
+openstack_version:
+  custom_container_images:
+    watcher/watcher-base:
+      - watcherAPIImage
+      - watcherApplierImage
+      - watcherDecisionEngineImage
+```
+
+All three keys resolve to the same exact `openstack-watcher-base` reference.
+The image contains the API, applier, and decision-engine entry points and the
+union of their runtime dependencies. Watcher is intentionally not split into
+process-specific images.
+
+Both Cyborg images build and publish but are absent from the central mapping.
+Their exact references therefore appear in provider diagnostics without adding
+fields to the default deployment map.
+
+A child job may provide `s2i_ci_image_mappings` as a mapping from a selected
+image target to a replacement list of keys. Replacement is per image rather
+than additive. The provider records whether each effective list came from
+tracked or inventory metadata and rejects malformed values, unknown or unbuilt
+image targets, empty key strings, duplicate keys, and a key assigned to more
+than one image.
+
+### Registry and returned data
+
+The provider starts or inherits a Zuul buildset registry, validates push and
+pull with a dedicated UBI tag, builds and pushes the selected image set, and
+pulls every exact result back. Credentials and certificate data remain in
+Zuul secret data. Returned public diagnostics use the buildset registry's
+reachable host or IP and port, never the builder-local registry alias.
+
+`s2i_ci_content.images` contains every exact successful reference, including
+base and both unmapped Cyborg images. The partial
+`content_provider_os_custom_container_images` map contains only effective
+keys joined to exact successful references. The legacy global OS registry URL
+remains the neutral `null` sentinel, while its namespace/tag and gating-repo
+fields remain empty or false because this selective provider does not publish a
+complete OpenStack image namespace. `cifmw_build_images_output`
+remains an empty mapping and is not repurposed for service images.
+
+Intended references are written before build mutation. Post-run cleanup
+removes only those exact Podman pullback and Buildah build tags, verifies exact
+absence, and removes a buildset registry only when its ownership marker is
+valid.
+Per-image parallel logs and registry/result manifests are retained under
+`zuul-output/logs/container-build/`.
+
+The provider pauses while dependent jobs run. Private onboarding may attach a
+trivial child that prints the returned registry paths and maps. That debug job
+does not pull images, patch an OpenStackVersion resource, deploy OpenStack, or
+invoke a downstream repository's playbooks. Downstream consumption is separate
+work.
+
 ## Updating source pins and locks
 
 Advance source records and regenerate dependent files with:
@@ -405,23 +511,27 @@ untouched and supplied its recorded HEAD while the maintained pin stayed
 unchanged. An unversioned source directory or any unresolvable ref fails the
 complete preflight before tracked mutation.
 
-To regenerate from the existing commits without advancing them:
+To regenerate from the existing commits without advancing them, use the
+canonical Python 3.12 runtime:
 
 ```console
-STREAM=master tox -e update-lockfiles
+STREAM=master uvx --python 3.12 tox -e update-lockfiles
 ```
 
-This is the reproducibility mode used by the unattached Zuul
-`s2i-openstack-containers-update-sources` job. Zuul tox jobs use Python 3.12,
-matching the container runtime default; other tooling remains version-neutral.
-The job uses an isolated tox cache, preserves the frozen manifest as a log
-artifact, and fails when regeneration leaves any tracked diff. Generated
-lock headers and resolver annotations are omitted so supported tooling runtimes
-do not create cosmetic drift. Service dependency inputs include the WebOb CGI
-compatibility package explicitly so Python 3.12 and newer resolvers produce the
-same package set without selecting a tooling interpreter. The scheduled/manual
-GitHub updater deliberately
-advances source pins; it is the freshness lane that proposes source movement.
+Python 3.12 is the only supported dependency-generation runtime. Python
+environment markers are evaluated by the generator interpreter, so another
+minor version can resolve a different package set; Python 3.13, for example,
+can select the `legacy-cgi` compatibility package. Tox rejects generation with
+a different interpreter instead of recording that host-dependent result.
+
+The GitHub source-reproducibility workflow runs this pinned mode with Python
+3.12, preserves the frozen manifest as an artifact, and fails when regeneration
+leaves a tracked diff. Generated lock headers, resolver annotations, and
+package-index directives are omitted because they describe the generating tool
+or environment rather than the dependency solution. This normalization removes
+cosmetic drift; it does not make dependency resolution portable across Python
+minor versions. The scheduled/manual GitHub updater deliberately advances
+source pins; it is the separate freshness lane that proposes source movement.
 
 Maintained source records and dependency inputs are reviewable inputs.
 Stream-suffixed constraints snapshots, requirements locks, build-requirements
@@ -495,13 +605,14 @@ interfaces use the same rules.
 
 ## Automation coverage
 
-GitHub runs build, unit, linter, and source-update workflows as described in
-`Publication authority`. The repository also defines reusable unit, linter,
-and pinned source-reproducibility jobs in `zuul.d/jobs.yaml`; project
-pipeline configuration is intentionally separate from those job definitions.
-The
-source-reproducibility job is intentionally unattached in this repository
-snapshot.
+GitHub runs build, unit, linter, pinned source-reproducibility, and source
+freshness workflows as described in `Publication authority`. Zuul retains the
+heavier Molecule contract and content-provider jobs on the CentOS Stream 10
+builder nodeset; GitHub Actions owns the lighter duplicate checks.
+
+The provider's Molecule scenario exercises normalized registry validation,
+tracked and inventory deployment metadata, exact-reference expansion, and
+matching Podman/Buildah cleanup with self-contained fake container clients.
 
 Neither development automation path changes Konflux's authority for hermetic
 production provenance and publication.
@@ -577,18 +688,40 @@ Check the stream-suffixed files in the project directory and the unsuffixed
 symlinks used by Containerfiles. Regenerate the project for the selected stream
 rather than manually repairing a generated symlink or lock file.
 
-## A parallel build fails without immediate context
+## A parallel build fails
 
-Set `BUILD_LOGS_DIR` and inspect the per-image files after the command exits:
+Set `BUILD_LOGS_DIR` and inspect the retained per-image files:
 
 ```console
 STREAM=master BUILD_LOGS_DIR=.tmp/build-logs \
   ./build.sh build-parallel all
 ```
 
-The current parallel implementation replays stored logs after the parallel
-phase. Use a serial build of the failing image when immediate terminal output
-is more useful.
+Parallel service output is prefixed by image and streamed while each build
+runs. The command preserves the failing exit status, stops outstanding builds,
+and reports the log directory without replaying every successful log.
+
+## Provider output or cleanup is incomplete
+
+Read provider artifacts in this order:
+
+```text
+intended-images.json
+registry-state.json
+build.log and per-image logs
+push.log
+published-images.json
+```
+
+`intended-images.json` exists before builds start and is the cleanup authority
+after partial failure. `published-images.json` contains the completed exact
+references, effective mappings, and mapping-source diagnostics. Cleanup failure
+is a job failure; compare the recorded references with both Podman and Buildah
+image listings.
+
+Parallel image lines are prefixed by target and emitted while builds run. The
+same prefixed lines remain in per-image logs, without a second successful-log
+replay at the end.
 
 ## Registry push fails
 

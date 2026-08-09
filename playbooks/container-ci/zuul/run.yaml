@@ -1,0 +1,12 @@
+---
+- name: Run shared selective image publication
+  ansible.builtin.import_playbook: ../shared/run.yaml
+
+- name: Return published image metadata to Zuul
+  hosts: builder
+  gather_facts: false
+
+  tasks:
+    - name: Return content-provider metadata to Zuul
+      when: s2i_ci_content_provider | default(false) | bool
+      ansible.builtin.include_tasks: content-provider-return.yaml

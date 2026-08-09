@@ -9,3 +9,4 @@ python3-cryptography
 libffi
 libxml2
 libxslt
+openssl-libs

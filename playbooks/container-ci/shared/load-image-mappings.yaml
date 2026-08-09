@@ -1,0 +1,67 @@
+---
+- name: Check the tracked image mapping manifest
+  ansible.builtin.stat:
+    path: "{{ s2i_ci_container_repo }}/containers/image-mappings.yaml"
+  register: s2i_ci_image_mapping_manifest
+
+- name: Require the tracked image mapping manifest
+  ansible.builtin.assert:
+    that:
+      - s2i_ci_image_mapping_manifest.stat.isreg | default(false)
+    fail_msg: containers/image-mappings.yaml is required
+
+- name: Read the tracked image mapping manifest
+  ansible.builtin.slurp:
+    src: "{{ s2i_ci_container_repo }}/containers/image-mappings.yaml"
+  register: s2i_ci_image_mapping_data
+
+- name: Decode the tracked image mapping manifest
+  ansible.builtin.set_fact:
+    s2i_ci_image_mapping_document: >-
+      {{ s2i_ci_image_mapping_data.content | b64decode | from_yaml }}
+
+- name: Validate the tracked image mapping schema
+  ansible.builtin.assert:
+    that:
+      - s2i_ci_image_mapping_document is mapping
+      - s2i_ci_image_mapping_document.openstack_version is mapping
+      - s2i_ci_image_mapping_document.openstack_version.custom_container_images is mapping
+    fail_msg: Malformed containers/image-mappings.yaml
+
+- name: Record tracked image mappings
+  ansible.builtin.set_fact:
+    s2i_ci_tracked_image_mappings: >-
+      {{ s2i_ci_image_mapping_document.openstack_version.custom_container_images }}
+    s2i_ci_tracked_deployment_keys: []
+
+- name: Resolve all available image targets
+  ansible.builtin.command:
+    argv:
+      - "{{ s2i_ci_container_repo }}/build.sh"
+      - resolve
+      - all
+  args:
+    chdir: "{{ s2i_ci_container_repo }}"
+  register: s2i_ci_available_images
+  changed_when: false
+
+- name: Reject mappings for unknown image targets
+  ansible.builtin.assert:
+    that:
+      - s2i_ci_tracked_image_mappings.keys() |
+          difference(s2i_ci_available_images.stdout_lines) | length == 0
+    fail_msg: containers/image-mappings.yaml names an unknown image target
+
+- name: Validate every tracked image mapping
+  ansible.builtin.include_tasks: validate-tracked-mapping-item.yaml
+  loop: "{{ s2i_ci_tracked_image_mappings.keys() | list }}"
+  loop_control:
+    loop_var: s2i_ci_tracked_mapping_target
+    label: "{{ s2i_ci_tracked_mapping_target }}"
+
+- name: Reject globally duplicated tracked deployment keys
+  ansible.builtin.assert:
+    that:
+      - s2i_ci_tracked_deployment_keys | unique | list | length ==
+          s2i_ci_tracked_deployment_keys | length
+    fail_msg: A tracked deployment key may be assigned to only one image

@@ -10,11 +10,15 @@ The repository currently builds:
 - `openstack-base`;
 - `openstack-cyborg`;
 - `openstack-cyborg-agent`;
+- `openstack-glance-api`;
+- `openstack-manila-api`;
+- `openstack-manila-scheduler`;
+- `openstack-manila-share`;
 - `openstack-watcher-base`.
 
-See [`developer-guide.md`](developer-guide.md) for the complete contributor
-reference, including source ownership, generated files, build architecture,
-testing, maintenance, and troubleshooting.
+See [`docs/developer-guide.md`](docs/developer-guide.md) for the complete
+contributor reference, including source ownership, generated files, build
+architecture, testing, maintenance, and troubleshooting.
 
 ## Quick start
 
@@ -50,9 +54,10 @@ build.sh                     build and source-maintenance implementation
 containers/base/             common openstack-base image
 containers/cyborg/           Cyborg sources and image contexts
 containers/watcher/          Watcher sources and image context
+docs/developer-guide.md      architecture and workflow reference
+docs/TESTING.md              concise testing entry point
 tests/                       stdlib unittest suite
 tox.ini                      contributor command environments
-developer-guide.md           architecture and workflow reference
 ```
 
 A service project normally contains shared source and generated dependency
@@ -104,11 +109,15 @@ After changing a source or dependency input, regenerate the derived files:
 STREAM=master tox -e update-sources
 ```
 
-To regenerate from the existing commits without advancing source pins:
+To regenerate from the existing commits without advancing source pins, use
+the canonical Python 3.12 runtime:
 
 ```console
-STREAM=master tox -e update-lockfiles
+STREAM=master uvx --python 3.12 tox -e update-lockfiles
 ```
+
+Dependency generation intentionally fails on other Python versions because
+Python environment markers can select a different package set.
 
 Pass multiple projects or images after `--` to update one deterministic
 selection:
@@ -151,8 +160,8 @@ filters so unrelated jobs are skipped entirely. Skipped workflows count as
 passing for required branch protection when the workflow file exists on the
 default branch. Linters always run. Manual `workflow_dispatch` runs everything.
 
-| Changed paths | Linters | Unit tests | update-sources | Build / push |
-|---------------|---------|------------|----------------|--------------|
+| Changed paths | Linters | Unit tests | lock check | Build / push |
+|---------------|---------|------------|------------|--------------|
 | Docs only (`*.md`, `LICENSE*`) | run | skip | skip | skip |
 | `containers/<service>/` | run | skip | run | **all** images |
 | `build.sh` | run | run | run | **all** images |

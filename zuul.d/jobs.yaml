@@ -1,27 +1,41 @@
 ---
 - job:
-    name: s2i-openstack-containers-unit
+    name: s2i-openstack-containers-molecule
     parent: tox
-    description: Run the stdlib unit test suite.
+    description: Run provider registry and cleanup contract scenarios.
+    nodeset: s2i-openstack-containers-image-builder
     vars:
       python_version: "3.12"
-      tox_envlist: unit
+      tox_envlist: molecule
+
+- nodeset:
+    name: s2i-openstack-containers-image-builder
+    nodes:
+      - name: builder
+        label: cloud-centos-10-stream
 
 - job:
-    name: s2i-openstack-containers-linters
-    parent: tox-linters
-    description: Run repository formatting and style checks.
+    name: s2i-openstack-container-content-provider
+    parent: base
+    description: |
+      Build and publish OpenStack service container images from committed
+      source pins for dependent jobs. This repository builds all maintained
+      images by default; child jobs can select a subset and add related
+      required projects. Speculative source consumption remains follow-up work.
+    timeout: 7200
+    nodeset: s2i-openstack-containers-image-builder
+    required-projects:
+      - github.com/openstack-k8s-operators/s2i-openstack-containers
+      - opendev.org/zuul/zuul-jobs
+    pre-run:
+      - playbooks/container-ci/zuul/reset-static-node.yaml
+      - playbooks/container-ci/zuul/pre.yaml
+    run: playbooks/container-ci/zuul/run.yaml
+    post-run: playbooks/container-ci/zuul/post.yaml
     vars:
-      python_version: "3.12"
-
-- job:
-    name: s2i-openstack-containers-update-sources
-    parent: tox
-    description: Verify generated source metadata from committed source pins.
-    post-run: playbooks/testing/update-sources-diff.yaml
-    vars:
-      python_version: "3.12"
-      tox_envlist: update-sources
-      tox_environment:
-        SKIP_HASH_UPDATE: "1"
-        STREAM: master
+      s2i_ci_container_project: >-
+        github.com/openstack-k8s-operators/s2i-openstack-containers
+      s2i_ci_images: all
+      s2i_ci_stream: master
+      s2i_ci_content_provider: true
+      s2i_ci_reset_static_node: false

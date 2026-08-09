@@ -27,6 +27,7 @@ packages:
   - libxslt-devel
   - mod_ssl
   - openssl-devel
+  - openssl-libs
   - python3
   - python3-cryptography
   - python3-devel

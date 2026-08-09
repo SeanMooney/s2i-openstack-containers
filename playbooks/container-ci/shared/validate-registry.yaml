@@ -1,0 +1,109 @@
+---
+- name: Validate the prepared image registry connection
+  hosts: builder
+  vars:
+    s2i_ci_output_dir: "{{ ansible_user_dir }}/zuul-output"
+    s2i_ci_log_dir: "{{ s2i_ci_output_dir }}/logs/container-build"
+    s2i_ci_registry_connection_file: >-
+      {{ s2i_ci_output_dir }}/.s2i-ci-registry-connection.json
+    s2i_ci_validation_source_image: registry.access.redhat.com/ubi10/ubi-minimal:latest
+    s2i_ci_validation_repository: s2i-validation/ubi10-minimal:latest
+
+  tasks:
+    - name: Load the normalized registry connection
+      ansible.builtin.slurp:
+        src: "{{ s2i_ci_registry_connection_file }}"
+      register: s2i_ci_registry_connection_data
+
+    - name: Decode the normalized registry connection
+      ansible.builtin.set_fact:
+        s2i_ci_registry_connection: >-
+          {{ s2i_ci_registry_connection_data.content | b64decode | from_json }}
+
+    - name: Require normalized registry connection data
+      ansible.builtin.assert:
+        that:
+          - s2i_ci_registry_connection is mapping
+          - s2i_ci_registry_connection.endpoint is string
+          - s2i_ci_registry_connection.endpoint | length > 0
+          - s2i_ci_registry_connection.public_host is string
+          - s2i_ci_registry_connection.public_host | length > 0
+          - s2i_ci_registry_connection.public_port | int > 0
+          - s2i_ci_registry_connection.auth_file | default('') is string
+          - s2i_ci_registry_connection.cert_dir | default('') is string
+
+    - name: Set normalized registry command parameters
+      ansible.builtin.set_fact:
+        s2i_ci_registry_endpoint: "{{ s2i_ci_registry_connection.endpoint }}"
+        s2i_ci_registry_auth_file: >-
+          {{ s2i_ci_registry_connection.auth_file | default('') }}
+        s2i_ci_registry_cert_dir: >-
+          {{ s2i_ci_registry_connection.cert_dir | default('') }}
+
+    - name: Pull the UBI 10 base image
+      ansible.builtin.command:
+        argv:
+          - podman
+          - pull
+          - "{{ s2i_ci_validation_source_image }}"
+      register: s2i_ci_ubi_pull
+      changed_when: "'Copying blob' in s2i_ci_ubi_pull.stdout"
+
+    - name: Tag the UBI 10 image for registry validation
+      ansible.builtin.command:
+        argv:
+          - podman
+          - tag
+          - "{{ s2i_ci_validation_source_image }}"
+          - "{{ s2i_ci_registry_endpoint }}/{{ s2i_ci_validation_repository }}"
+      changed_when: true
+
+    - name: Push the UBI 10 validation image
+      ansible.builtin.command:
+        argv: >-
+          {{ ['podman', 'push', '--remove-signatures']
+             + (['--authfile', s2i_ci_registry_auth_file]
+                if s2i_ci_registry_auth_file | length > 0 else [])
+             + (['--cert-dir', s2i_ci_registry_cert_dir]
+                if s2i_ci_registry_cert_dir | length > 0 else [])
+             + [s2i_ci_registry_endpoint + '/' + s2i_ci_validation_repository] }}
+      changed_when: true
+
+    - name: Remove the validation tag before pulling it back
+      ansible.builtin.command:
+        argv:
+          - podman
+          - untag
+          - "{{ s2i_ci_registry_endpoint }}/{{ s2i_ci_validation_repository }}"
+      changed_when: true
+
+    - name: Pull the UBI 10 validation image back from the registry
+      ansible.builtin.command:
+        argv: >-
+          {{ ['podman', 'pull']
+             + (['--authfile', s2i_ci_registry_auth_file]
+                if s2i_ci_registry_auth_file | length > 0 else [])
+             + (['--cert-dir', s2i_ci_registry_cert_dir]
+                if s2i_ci_registry_cert_dir | length > 0 else [])
+             + [s2i_ci_registry_endpoint + '/' + s2i_ci_validation_repository] }}
+      changed_when: false
+
+    - name: Inspect the UBI 10 validation image from the registry
+      ansible.builtin.command:
+        argv:
+          - podman
+          - image
+          - inspect
+          - "{{ s2i_ci_registry_endpoint }}/{{ s2i_ci_validation_repository }}"
+      changed_when: false
+
+    - name: Record non-secret registry state
+      ansible.builtin.copy:
+        dest: "{{ s2i_ci_log_dir }}/registry-state.json"
+        mode: "0644"
+        content: |
+          {{ {
+               'endpoint': s2i_ci_registry_endpoint,
+               'validation_source': s2i_ci_validation_source_image,
+               'validation_image': s2i_ci_registry_endpoint + '/' + s2i_ci_validation_repository
+             } | to_nice_json }}
