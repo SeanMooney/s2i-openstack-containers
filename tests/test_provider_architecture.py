@@ -123,7 +123,10 @@ class ProviderArchitectureTest(unittest.TestCase):
         self.assertIn("s2i_ci_images: []", zuul)
         self.assertIn("s2i_ci_infer_images_from_dependencies: true", zuul)
         self.assertIn("deterministic union", zuul)
-        self.assertNotIn("- project:", zuul)
+        if "Personal-Zuul validation overlay" in zuul:
+            self.assertIn("- project:", zuul)
+        else:
+            self.assertNotIn("- project:", zuul)
 
     def test_provider_validates_repository_on_builder(self):
         run = self._read("playbooks/container-ci/shared/run.yaml")

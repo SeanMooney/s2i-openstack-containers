@@ -1,0 +1,5 @@
+---
+- name: Run tox without changing sudo policy on a reused static node
+  hosts: all
+  roles:
+    - tox

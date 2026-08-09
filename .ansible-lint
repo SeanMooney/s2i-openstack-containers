@@ -9,4 +9,5 @@ mock_roles:
   - ensure-output-dirs
   - ensure-podman
   - run-buildset-registry
+  - tox
   - use-buildset-registry

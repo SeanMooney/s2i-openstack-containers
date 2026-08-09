@@ -74,3 +74,65 @@
       s2i_ci_stream: master
       s2i_ci_content_provider: true
       s2i_ci_reset_static_node: false
+
+# Personal-Zuul validation overlay. This commit is not part of the prototype
+# series and is rebased as that series advances.
+- nodeset:
+    name: s2i-openstack-containers-static-test
+    nodes:
+      - name: controller
+        label: almalinux-10-static
+
+- nodeset:
+    name: s2i-openstack-containers-static-image-builder
+    nodes:
+      - name: builder
+        label: centos-10-stream-static
+
+- job:
+    name: s2i-openstack-containers-fork-provider
+    parent: s2i-openstack-container-content-provider
+    description: Validate selective publication in the personal Zuul.
+    nodeset: s2i-openstack-containers-static-image-builder
+    required-projects:
+      - github.com/SeanMooney/s2i-openstack-containers
+      - opendev.org/openstack/requirements
+      - opendev.org/openstack/watcher
+      - opendev.org/openstack/cyborg
+      - opendev.org/zuul/zuul-jobs
+    vars:
+      s2i_ci_container_project: >-
+        github.com/SeanMooney/s2i-openstack-containers
+      s2i_ci_reset_static_node: true
+
+- job:
+    name: s2i-openstack-containers-provider-debug
+    parent: base
+    description: Print and validate selective provider return data.
+    run: playbooks/testing/provider-return-debug.yaml
+
+- project:
+    check:
+      jobs:
+        - s2i-openstack-containers-unit
+        - s2i-openstack-containers-linters
+        - s2i-openstack-containers-update-sources
+        - s2i-openstack-containers-molecule:
+            nodeset: s2i-openstack-containers-static-test
+            run: playbooks/testing/tox-static-node-run.yaml
+        - s2i-openstack-containers-fork-provider
+        - s2i-openstack-containers-provider-debug:
+            dependencies:
+              - s2i-openstack-containers-fork-provider
+    gate:
+      jobs:
+        - s2i-openstack-containers-unit
+        - s2i-openstack-containers-linters
+        - s2i-openstack-containers-update-sources
+        - s2i-openstack-containers-molecule:
+            nodeset: s2i-openstack-containers-static-test
+            run: playbooks/testing/tox-static-node-run.yaml
+        - s2i-openstack-containers-fork-provider
+        - s2i-openstack-containers-provider-debug:
+            dependencies:
+              - s2i-openstack-containers-fork-provider

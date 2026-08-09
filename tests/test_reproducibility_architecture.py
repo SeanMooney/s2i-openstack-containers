@@ -35,7 +35,32 @@ class ReproducibilityArchitectureTest(unittest.TestCase):
             update_job,
         )
         self.assertIn('SKIP_HASH_UPDATE: "1"', update_job)
-        self.assertNotIn("- project:", configuration)
+        if "Personal-Zuul validation overlay" in configuration:
+            self.assertIn("- project:", configuration)
+            personal_configuration = configuration.split(
+                "Personal-Zuul validation overlay", 1
+            )[1]
+            self.assertEqual(
+                2,
+                personal_configuration.count(
+                    "- s2i-openstack-containers-update-sources"
+                ),
+            )
+            for pod_job in (
+                "unit",
+                "linters",
+                "update-sources",
+            ):
+                self.assertNotIn(
+                    f"- s2i-openstack-containers-{pod_job}:",
+                    personal_configuration,
+                )
+            debug_job = personal_configuration.split(
+                "name: s2i-openstack-containers-provider-debug", 1
+            )[1].split("- project:", 1)[0]
+            self.assertNotIn("nodeset:", debug_job)
+        else:
+            self.assertNotIn("- project:", configuration)
         self.assertFalse(
             (
                 self.repo_root / "playbooks/testing/update-sources-pre.yaml"
