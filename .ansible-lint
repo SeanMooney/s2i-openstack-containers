@@ -8,5 +8,6 @@ mock_roles:
   - collect-container-logs
   - ensure-output-dirs
   - ensure-podman
+  - ensure-python
   - run-buildset-registry
   - use-buildset-registry

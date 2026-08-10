@@ -12,6 +12,7 @@
 
 """Tests for build.sh update-sources behavior."""
 
+import csv
 import os
 import pathlib
 import subprocess
@@ -66,6 +67,10 @@ class UpdateSourcesTest(unittest.TestCase):
         (image_root / "builddeps.txt").write_text("gcc\n", encoding="utf-8")
         (image_root / "pythondeps.txt").touch()
         (image_root / "pythonbuilddeps.txt").touch()
+        self.manifest_path = (
+            self.test_root
+            / ".tmp/source-maintenance/frozen-source-refs.master.tsv"
+        )
 
     def run_command(self, command, cwd=None):
         result = subprocess.run(
@@ -107,7 +112,7 @@ class UpdateSourcesTest(unittest.TestCase):
             content, encoding="utf-8"
         )
 
-    def run_update(self, **environment):
+    def run_update_result(self, **environment):
         command_environment = os.environ.copy()
         command_environment.update({"STREAM": "master"})
         command_environment.update(environment)
@@ -122,12 +127,24 @@ class UpdateSourcesTest(unittest.TestCase):
         (self.test_root / "build.log").write_text(
             result.stdout + result.stderr, encoding="utf-8"
         )
+        return result
+
+    def run_update(self, **environment):
+        result = self.run_update_result(**environment)
         if result.returncode != 0:
             self.fail(
                 f"update-sources failed with {result.returncode}:\n"
                 f"{result.stdout}{result.stderr}"
             )
         return result.stdout + result.stderr
+
+    def manifest_for_stream(self, stream):
+        filename = f"frozen-source-refs.{stream.replace('/', '%2F')}.tsv"
+        return self.test_root / ".tmp/source-maintenance" / filename
+
+    def manifest_rows(self):
+        with self.manifest_path.open(encoding="utf-8", newline="") as stream:
+            return list(csv.DictReader(stream, delimiter="\t"))
 
     def source_field(self, name, field):
         for line in (
@@ -140,7 +157,7 @@ class UpdateSourcesTest(unittest.TestCase):
                 return columns[field - 1]
         self.fail(f"source entry was not found: {name}")
 
-    def test_updates_hashes_to_branch_tip(self):
+    def test_updates_hashes_to_frozen_branch_tips(self):
         self.run_update()
 
         self.assertEqual(
@@ -148,6 +165,15 @@ class UpdateSourcesTest(unittest.TestCase):
             self.source_field("upper-constraints", 5),
         )
         self.assertEqual(self.service_new, self.source_field("test-svc", 5))
+        rows = self.manifest_rows()
+        self.assertEqual(
+            ["upper-constraints", "test-svc"], [row["name"] for row in rows]
+        )
+        self.assertEqual(
+            [self.requirements_new, self.service_new],
+            [row["frozen_commit"] for row in rows],
+        )
+        self.assertEqual({"declared-ref"}, {row["authority"] for row in rows})
 
     def test_fetches_upper_constraints(self):
         self.run_update()
@@ -176,9 +202,9 @@ class UpdateSourcesTest(unittest.TestCase):
     def test_generates_buildrequirements_lock(self):
         self.run_update()
 
-        self.assertTrue(
-            (self.project_root / "buildrequirements.lock.master").is_file()
-        )
+        build_lock = self.project_root / "buildrequirements.lock.master"
+        self.assertTrue(build_lock.is_file())
+        self.assertNotIn("# via", build_lock.read_text(encoding="utf-8"))
 
     def test_creates_default_stream_symlinks(self):
         self.run_update(DEFAULT_STREAM="master")
@@ -203,7 +229,7 @@ class UpdateSourcesTest(unittest.TestCase):
         ):
             self.assertFalse((self.project_root / name).is_symlink())
 
-    def test_skip_hash_update_preserves_hashes(self):
+    def test_skip_hash_update_preserves_and_records_committed_hashes(self):
         self.run_update(SKIP_HASH_UPDATE="1")
 
         self.assertEqual(
@@ -214,6 +240,12 @@ class UpdateSourcesTest(unittest.TestCase):
         self.assertTrue(
             (self.project_root / "requirements.lock.master").is_file()
         )
+        rows = self.manifest_rows()
+        self.assertEqual(
+            [self.requirements_old, self.service_old],
+            [row["frozen_commit"] for row in rows],
+        )
+        self.assertEqual({"committed-pin"}, {row["authority"] for row in rows})
 
     def test_skip_hash_update_uses_pinned_constraints(self):
         self.run_update(SKIP_HASH_UPDATE="1")
@@ -275,13 +307,12 @@ class UpdateSourcesTest(unittest.TestCase):
         self.assertNotIn("six==", lock)
         self.assertIn("Filtering RPM-provided packages", output)
 
-    def test_preexisting_checkout_is_preserved(self):
+    def test_preexisting_checkout_is_preserved_and_recorded(self):
         source = self.project_root / "src" / "test-svc"
-        source.mkdir()
-        (source / "MARKER").write_text("local-dev\n", encoding="utf-8")
-        (source / "requirements.txt").write_text(
-            "six\npbr\n", encoding="utf-8"
+        self.run_command(
+            ["git", "clone", str(self.upstream_service), str(source)]
         )
+        (source / "MARKER").write_text("local-dev\n", encoding="utf-8")
 
         self.run_update()
 
@@ -290,6 +321,105 @@ class UpdateSourcesTest(unittest.TestCase):
             (source / "MARKER").read_text(encoding="utf-8"),
         )
         self.assertEqual(self.service_old, self.source_field("test-svc", 5))
+        service_row = self.manifest_rows()[1]
+        self.assertEqual("pre-existing-checkout", service_row["authority"])
+        self.assertEqual(self.service_new, service_row["frozen_commit"])
+
+    def test_unversioned_preexisting_source_fails_before_mutation(self):
+        source = self.project_root / "src" / "test-svc"
+        source.mkdir()
+        (source / "requirements.txt").write_text("six\n", encoding="utf-8")
+        original_sources = (self.project_root / "sources.txt").read_bytes()
+
+        result = self.run_update_result()
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("is not a Git checkout", result.stderr)
+        self.assertEqual(
+            original_sources, (self.project_root / "sources.txt").read_bytes()
+        )
+        self.assertFalse(
+            (self.project_root / "upper-constraints.txt.master").exists()
+        )
+        self.assertFalse(self.manifest_path.exists())
+
+    def test_slash_stream_uses_safe_manifest_filename(self):
+        result = self.run_update_result(STREAM="stable/test")
+
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        manifest = self.manifest_for_stream("stable/test")
+        self.assertTrue(manifest.is_file())
+        self.assertEqual(
+            self.test_root / ".tmp/source-maintenance", manifest.parent
+        )
+        self.assertFalse(
+            (self.test_root / ".tmp/source-maintenance/stable").exists()
+        )
+
+    def test_unsafe_stream_fails_before_filesystem_mutation(self):
+        original_sources = (self.project_root / "sources.txt").read_bytes()
+
+        result = self.run_update_result(STREAM="../../escape")
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("Unsafe stream name", result.stderr)
+        self.assertEqual(
+            original_sources, (self.project_root / "sources.txt").read_bytes()
+        )
+        self.assertFalse((self.test_root / ".tmp").exists())
+
+    def test_unresolvable_ref_fails_before_mutation(self):
+        self.write_sources(
+            "master upper-constraints "
+            f"{self.upstream_requirements} master {self.requirements_old}\n"
+            "master test-svc "
+            f"{self.upstream_service} missing-branch {self.service_old}\n"
+        )
+        original_sources = (self.project_root / "sources.txt").read_bytes()
+
+        result = self.run_update_result()
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("Could not freeze ref 'missing-branch'", result.stderr)
+        self.assertEqual(
+            original_sources, (self.project_root / "sources.txt").read_bytes()
+        )
+        self.assertFalse(
+            (self.project_root / "upper-constraints.txt.master").exists()
+        )
+        self.assertFalse(self.manifest_path.exists())
+
+    def test_failed_preflight_removes_stale_manifest(self):
+        self.run_update()
+        self.assertTrue(self.manifest_path.is_file())
+        self.write_sources(
+            "master upper-constraints "
+            f"{self.upstream_requirements} master {self.requirements_new}\n"
+            "master test-svc "
+            f"{self.upstream_service} missing-branch {self.service_new}\n"
+        )
+
+        result = self.run_update_result()
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertFalse(self.manifest_path.exists())
+
+    def test_duplicate_ref_records_retain_deterministic_rows(self):
+        image_sources = self.project_root / "test-svc" / "sources.txt"
+        image_sources.write_text(
+            "master helper "
+            f"{self.upstream_service} master {self.service_old}\n",
+            encoding="utf-8",
+        )
+
+        self.run_update()
+
+        rows = self.manifest_rows()
+        self.assertEqual(
+            ["upper-constraints", "test-svc", "helper"],
+            [row["name"] for row in rows],
+        )
+        self.assertEqual(rows[1]["frozen_commit"], rows[2]["frozen_commit"])
 
 
 if __name__ == "__main__":

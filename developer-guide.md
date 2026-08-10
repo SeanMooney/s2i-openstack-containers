@@ -681,14 +681,48 @@ This resolves configured branch tips, updates exact source commits, refreshes
 constraints, regenerates RPM inputs and both lock-file classes, and recreates
 default-stream symlinks.
 
+Before changing any tracked file, the updater freezes every selected declared
+reference to one exact commit. It retains those fetched objects for the whole
+run, so a moving branch cannot supply different content after preflight. The
+atomic record is written to:
+
+```text
+.tmp/source-maintenance/frozen-source-refs.<stream>.tsv
+```
+
+A slash in a stream name is encoded as `%2F` in this filename. Unsafe stream
+components such as `.` or `..` are rejected before filesystem mutation.
+
+Each repository-ordered row records the source manifest, declared ref,
+committed pin, frozen effective commit, and authority. `declared-ref` means an
+advancement run resolved the maintained branch or tag. `committed-pin` means a
+pinned run used the existing SHA without querying a branch head.
+`pre-existing-checkout` means an intentional Git checkout below `src/` remained
+untouched and supplied its recorded HEAD while the maintained pin stayed
+unchanged. An unversioned source directory or any unresolvable ref fails the
+complete preflight before tracked mutation.
+
 To regenerate from the existing commits without advancing them:
 
 ```console
 STREAM=master SKIP_HASH_UPDATE=1 tox -e update-sources
 ```
 
-Always inspect `git diff -- containers/`. A clean command exit does not replace
-review of source changes and generated dependency movement.
+This is the reproducibility mode used by the unattached Zuul
+`s2i-openstack-containers-update-sources` job. The job runs the canonical
+Python 3.14 generator with an isolated tox cache, preserves the frozen manifest
+as a log artifact, and fails when regeneration leaves any tracked diff. The
+scheduled/manual GitHub updater also uses Python 3.14 but deliberately omits
+`SKIP_HASH_UPDATE`; it is the freshness lane that proposes source movement.
+
+Maintained source records and dependency inputs are reviewable inputs.
+Stream-suffixed constraints snapshots, requirements locks, build-requirements
+locks, RPM input files, and default-stream symlinks are generator-owned outputs.
+Regenerate them together; do not hand-edit generated output to hide drift.
+
+Always inspect `git diff -- containers/` and compare updated pins with the
+frozen manifest. A clean command exit does not replace review of source changes
+and generated dependency movement.
 
 ## Adding an image
 
@@ -798,8 +832,10 @@ interfaces use the same rules.
 
 GitHub runs build, unit, linter, and source-update workflows as described in
 `Publication authority`. The repository also defines reusable unit, linter,
-Molecule, and abstract selective content-provider jobs in `.zuul.yaml`; project
-attachment is intentionally managed outside those job definitions.
+Molecule, pinned source-reproducibility, and abstract selective content-provider
+jobs in `.zuul.yaml`; project attachment is intentionally managed outside those
+job definitions. The source-reproducibility job is intentionally unattached in
+this repository snapshot.
 
 The provider's Molecule scenario exercises normalized registry validation,
 tracked and inventory deployment metadata, exact-reference expansion, and
@@ -830,7 +866,9 @@ files. Tool-created untracked state should remain below `.tmp/`.
 | Containerfile | `tox -e linters`, affected image build |
 | Python dependency input | regenerate locks, unit, linter, affected build |
 | RPM dependency input | regenerate `rpms.in.yaml`, linter, affected build |
-| `sources.txt` | regenerate project, inspect pins and locks, affected build |
+| `sources.txt` | ordinary frozen refresh, inspect manifest/pins/locks, pinned clean refresh, affected build |
+| Generator-owned constraints, lock, RPM, or symlink | pinned refresh, require no tracked diff |
+| Source-maintenance job or runtime | focused updater tests, pinned clean refresh on Python 3.14, stale-output failure |
 | base image or script | unit, linter, build all service images |
 | OIB-local cache/workspace/lifecycle | unit, linter, Molecule, phased and full local lifecycle |
 | GitHub workflow | YAML/linter checks and workflow review |
@@ -848,8 +886,22 @@ that all source records contain the expected exact commits. Re-run generation
 from a clean tree and compare the complete `containers/` diff.
 
 Moving branch tips can legitimately change pins when `SKIP_HASH_UPDATE` is not
-set. Use keep-pins regeneration when testing determinism against committed
-sources.
+set. Compare the resulting pins with
+the stream-safe `.tmp/source-maintenance/frozen-source-refs.<stream>.tsv`;
+every updated pin must match its frozen `declared-ref` commit. Use pinned regeneration when testing
+determinism against committed sources.
+
+If preflight fails, inspect the named URL/ref and authority before retrying. A
+missing manifest means resolution stopped before the complete input set was
+frozen. A `pre-existing-checkout` row is an explicit local override: compare its
+recorded HEAD, then remove the checkout for a committed-pin reproduction.
+
+If pinned regeneration leaves a tracked diff, do not dismiss it as cache noise.
+Confirm Python 3.14, `STREAM`, `TARGET`, and the isolated tox cache; verify every
+manifest row says `committed-pin` on a clean tree; then inspect the first changed
+generator-owned file and regenerate the complete selected scope. The Zuul
+post-run diff assertion intentionally treats this state as a stale-input
+failure.
 
 ## A service package still comes from an index
 

@@ -1,0 +1,7 @@
+---
+- name: Prepare the canonical source-generation Python
+  hosts: all
+  roles:
+    - role: ensure-python
+      python_version: "3.14"
+      python_use_pyenv: true

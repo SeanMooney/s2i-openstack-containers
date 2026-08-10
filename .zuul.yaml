@@ -12,6 +12,18 @@
     description: Run repository formatting and style checks.
 
 - job:
+    name: s2i-openstack-containers-update-sources
+    parent: tox
+    description: Verify generated source metadata from committed source pins.
+    pre-run: playbooks/testing/update-sources-pre.yaml
+    post-run: playbooks/testing/update-sources-diff.yaml
+    vars:
+      tox_envlist: update-sources
+      tox_environment:
+        SKIP_HASH_UPDATE: "1"
+        STREAM: master
+
+- job:
     name: s2i-openstack-containers-molecule
     parent: tox
     description: Run provider registry, staging, and cleanup scenarios.
