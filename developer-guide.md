@@ -330,11 +330,17 @@ The build stage:
 
 1. copies project and image source directories;
 2. installs build-only RPM and Python dependencies;
-3. removes source-built package names from effective constraints;
+3. consumes the effective per-image constraints and source-package map;
 4. builds service and override wheels;
 5. builds remaining dependency wheels;
 6. records source package versions and commits; and
 7. generates service configuration where required.
+
+Prepared OIB/Zuul contexts contain an image-local effective lock with every
+source-built distribution removed. Standalone builds use the committed project
+lock and the image's meaningful tracked `source-package-map.txt`. Provenance
+generation fails rather than recording an unknown commit, missing source, or
+ambiguous wheel.
 
 The runtime stage:
 
@@ -480,15 +486,17 @@ validation, builds, publication, result generation, and cleanup target that
 host explicitly. The Zuul executor controls Ansible but does not perform those
 mutations.
 
-The provider defaults to an empty explicit image list with direct selection
-enabled. OIB applies these rules:
+The provider defaults to an empty explicit image list with dependency
+selection enabled. OIB applies these rules:
 
 1. preserve non-empty explicit image targets in request order;
-2. infer images whose effective `sources.txt` repository records name projects
-   in the speculative Zuul item sequence;
-3. build the required base, then the deterministic union of explicit and
+2. infer images whose effective `sources.txt` repository records name primary
+   projects in the speculative Zuul item sequence;
+3. for an unmatched changed project, statically match its normalized Python
+   distribution against image dependency inputs;
+4. build the required base, then the deterministic union of explicit and
    inferred service images; and
-4. build all images when neither an explicit image nor an external changed
+5. build all images when neither an explicit image nor an external changed
    project exists.
 
 An explicit Watcher target therefore builds only consolidated Watcher and its
@@ -499,11 +507,14 @@ a changed Cyborg project produces Watcher followed by the two inferred Cyborg
 images without duplicates.
 
 Direct matching considers repository source records only. The requirements
-constraints record is not a primary service source, and package-level
-transitive matching is outside this direct-selection contract. An external
-project with no direct match fails clearly rather than silently building an
-unrelated image set. A job can disable inference, but it must then supply a
-non-empty explicit image list.
+constraints record is not a primary service source. Only projects with no
+direct match proceed to package-level inference. OIB reads PEP 621
+`pyproject.toml`, `setup.cfg` metadata, or a literal `setup.py` name without
+executing project code, normalizes the distribution using PEP 503 rules, and
+matches it against runtime locks, build locks, and image Python dependency
+files. Missing or conflicting static metadata, an unused distribution, or an
+additional dependency required by `base` fails clearly. A job can disable
+inference, but it must then supply a non-empty explicit image list.
 
 `build.sh` receives one comma-separated expression from the resulting immutable
 plan and automatically retains the required base. Existing single-image,
@@ -513,14 +524,15 @@ project, and `all` shell targets keep their standalone behavior.
 
 The installed `oib plan` command is a side-effect-free planning boundary. It
 reads explicit image inputs, the Zuul item sequence, `sources.txt`, mandatory
-`image.yaml` files, optional inventory mappings, and `zuul.projects`. Its atomic
-version 2 JSON output includes selection reason, explicit images, changed
-projects, inferred images, affected images per project, final ordered images,
-context scopes, deployment keys, source destinations, declared refs and
-maintained pins, inventory commits, and the
-`zuul-prepared-workspace-head` authority reason. It does not fetch Git objects,
-copy repositories, assemble contexts, invoke Ansible or Buildah, publish
-images, or perform cleanup.
+`image.yaml` files, optional inventory mappings, `zuul.projects`, dependency
+inputs, and static metadata in prepared Python checkouts. Its atomic version 3
+JSON output includes separate direct and transitive selection diagnostics,
+final ordered images, context scopes, deployment keys, source destinations,
+inventory commits, per-image source packages, generated effective locks and
+maps, content digests, and the `zuul-prepared-workspace-head` authority reason.
+It never imports project code and does not fetch Git objects, copy repositories,
+assemble contexts, invoke Ansible or Buildah, publish images, or perform
+cleanup.
 
 Zuul prepares required `requirements`, Watcher, and Cyborg repositories and
 places them in its standard workspace. The shared run playbook resolves those
@@ -532,14 +544,57 @@ context tree atomically.
 
 The provider invokes `build.sh` with `S2I_CONTEXTS_ROOT` pointing at those
 contexts and `ERROR_ON_CLONE=1`. Consequently, missing speculative service
-source or prepared context content fails instead of falling back to network
-acquisition. The context keeps each committed filtered
-`requirements.lock.<stream>` as the build constraint input. The prepared
-`requirements` HEAD and its upper-constraints file are validated, staged, and
-recorded, but dependency-aware filtering against that checkout belongs to the
-separate transitive-constraint workflow. Direct contributor and GitHub shell
-builds without `S2I_CONTEXTS_ROOT` retain maintained-pin cloning as an
-independent compatibility path.
+source, effective lock, package map, or prepared context content fails instead
+of falling back to network acquisition or committed package inputs. The
+prepared `requirements` HEAD and upper-constraints file remain validated,
+staged, and recorded. Each image's effective lock is instead derived from its
+committed `requirements.lock.<stream>` so unrelated source-only packages from
+the full upper constraints are never sent to `pip wheel`. Direct contributor
+and GitHub shell builds without `S2I_CONTEXTS_ROOT` retain maintained-pin
+cloning, committed locks, and tracked package maps as an independent
+compatibility path.
+
+### Transitive source packages and planned constraints
+
+A changed Python library not named by `sources.txt` is a source override rather
+than a new primary source. For every affected image, the plan places its
+prepared checkout at:
+
+```text
+<project>/<image>/src/overrides/<project-name>/
+```
+
+The isolated Containerfile sees that path as
+`/src/overrides/<project-name>`. Per-image placement prevents sibling images
+sharing a project context from receiving dependencies they do not consume.
+Additional dependencies used by the base image are rejected because a service
+build cannot safely replace a package already installed into `openstack-base`.
+
+For every selected service image, the plan creates two builder-materialized
+inputs:
+
+```text
+<image>/source-package-map.effective.txt
+<image>/requirements.lock.effective.<stream>
+```
+
+Map rows bind a relative `/src` path to a normalized distribution. The
+effective lock removes complete logical records for those source-built
+distributions while preserving every unrelated byte and pin. The shared
+`hosts: builder` playbook verifies each content digest and destination beneath
+the atomic context assembly root before activation. OIB computes content but
+never writes a context.
+
+The Containerfile builds mapped checkouts as wheels and writes their actual Git
+HEAD and wheel version to `/source-built-packages.txt`. Missing mapped sources,
+Git metadata, wheels, or unique versions fail the build. The plan,
+`source-placements.json`, and `build-contexts.json` retain the planned package
+and generated-file provenance for diagnosis.
+
+These development builds still resolve Python and RPM dependencies online.
+Hermeto/Cachi2 prefetch, hashed artifact locks, RPM locks, and network-disabled
+Buildah are separate future work; Konflux remains authoritative for hermetic
+production inputs and provenance.
 
 ### Image deployment metadata
 
@@ -659,14 +714,30 @@ consumes it, add that canonical project to the provider job's
 `required-projects`, and ensure its prepared checkout appears in
 `zuul.projects`. A project-scoped record affects every image in that project;
 an image-scoped record affects only that image. Do not add a package-only
-library here merely to trigger an image--that requires the separate transitive
-source-selection contract.
+library here merely to trigger an image; package dependencies use transitive
+source selection.
 
 Validate the planner with a Zuul item for the new project. Confirm the selection
 manifest records the canonical changed project, the exact affected images, and
 the expected deterministic final order. Then run source-staging Molecule and a
 real selective provider build. Add deployment keys to `image.yaml` only when
 the umbrella API actually exposes those fields.
+
+## Adding a transitive Python source
+
+Do not add a `sources.txt` record when a changed project is consumed as a Python
+package rather than as an image's primary source. Ensure the project exposes one
+unambiguous static distribution name and that the normalized name appears in an
+effective runtime/build lock or image Python dependency file. Add the project
+to the provider's prepared workspace when it is not already supplied by the
+speculative item.
+
+Test direct and transitive diagnostics separately. Verify every affected image
+gets an image-local `src/overrides/` placement, effective map, and filtered lock;
+verify unrelated pins remain byte-identical; and inspect both planned provenance
+and `/source-built-packages.txt`. A package required by `base`, dynamic-only
+metadata, conflicting names, duplicate destinations, and distributions unused
+by all images are unsupported and fail planning.
 
 # Part V - Testing and Validation
 

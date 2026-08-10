@@ -117,6 +117,7 @@ class ProviderArchitectureTest(unittest.TestCase):
     def test_provider_job_keeps_direct_selection_builder_contract(self):
         zuul = self._read(".zuul.yaml")
 
+        self.assertIn("against image dependency inputs", zuul)
         self.assertIn("name: builder", zuul)
         self.assertIn("nodeset: s2i-openstack-containers-image-builder", zuul)
         self.assertIn("s2i_ci_images: []", zuul)
@@ -239,9 +240,12 @@ class ProviderArchitectureTest(unittest.TestCase):
         planner_content = "\n".join(
             (planner / name).read_text(encoding="utf-8")
             for name in (
+                "dependencies.py",
                 "images.py",
+                "packages.py",
                 "plan.py",
                 "projects.py",
+                "python_metadata.py",
                 "selection.py",
                 "sources.py",
             )
@@ -255,7 +259,7 @@ class ProviderArchitectureTest(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, planner_content)
 
-    def test_c5_plan_owns_direct_selection_without_transitive_parsing(self):
+    def test_c6_keeps_package_parsing_below_selection(self):
         selection = self._read("openstack_image_builder/selection.py")
         staging = self._read(
             "playbooks/container-ci/shared/prepare-sources.yaml"
@@ -264,9 +268,59 @@ class ProviderArchitectureTest(unittest.TestCase):
         self.assertIn("directly_affected_images", selection)
         self.assertIn("record[\"type\"] == \"repository\"", selection)
         self.assertIn("'zuul_items': zuul['items'] | default([])", staging)
-        self.assertIn("s2i_ci_plan.version == 2", staging)
+        self.assertIn("s2i_ci_plan.version == 3", staging)
+        self.assertIn("generated-file-item.yaml", staging)
         for forbidden in ("setup.py", "pyproject.toml", "requirements.lock"):
             self.assertNotIn(forbidden, selection)
+
+        generated = self._read(
+            "playbooks/container-ci/shared/generated-file-item.yaml"
+        )
+        self.assertLess(
+            generated.index("Require a safe planned generated file"),
+            generated.index(
+                "Canonicalize existing planned generated file parent"
+            ),
+        )
+        self.assertLess(
+            generated.index(
+                "Require existing generated file parent beneath assembly root"
+            ),
+            generated.index("Materialize planned generated file"),
+        )
+        self.assertNotIn("ansible.builtin.file:", generated)
+        self.assertIn("'/../' not in", generated)
+
+    def test_c6_package_inputs_are_image_local_and_helper_free(self):
+        expected = {
+            "containers/cyborg/cyborg/source-package-map.txt": "cyborg openstack-cyborg\n",
+            "containers/cyborg/cyborg-agent/source-package-map.txt": "cyborg openstack-cyborg\n",
+            "containers/watcher/watcher-base/source-package-map.txt": "watcher python-watcher\n",
+        }
+        for path, content in expected.items():
+            self.assertEqual(content, self._read(path))
+        self.assertFalse(
+            (
+                self.repo_root
+                / "containers/base/scripts/filter_source_constraints"
+            ).exists()
+        )
+        self.assertFalse(
+            list(self.repo_root.glob("containers/*/source-packages.txt"))
+        )
+        self.assertFalse(
+            list(self.repo_root.glob("containers/*/source-package-map.txt"))
+        )
+        for containerfile in self.repo_root.glob(
+            "containers/*/*/Containerfile"
+        ):
+            content = containerfile.read_text(encoding="utf-8")
+            self.assertIn("ARG SOURCE_PACKAGE_MAP=", content)
+            self.assertNotIn('echo "unknown"', content)
+            self.assertIn("for src_dir in /src/overrides/*/", content)
+            self.assertNotIn(
+                "for src_dir in /src/*/ /src/overrides/*/", content
+            )
 
     def test_local_lifecycle_reuses_shared_run_ownership(self):
         local_run = self._read("playbooks/container-ci/local/run.yaml")

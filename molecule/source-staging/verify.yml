@@ -16,6 +16,11 @@
         - "{{ s2i_test_repo_root }}/.tmp/build-contexts/watcher/watcher-base/Containerfile"
         - "{{ s2i_test_repo_root }}/.tmp/build-contexts/watcher/src/watcher/fixture.txt"
         - "{{ s2i_test_repo_root }}/.tmp/build-contexts/cyborg/src/cyborg/fixture.txt"
+        - "{{ s2i_test_repo_root }}/.tmp/build-contexts/watcher/watcher-base/src/overrides/os-resource-classes/fixture.txt"
+        - "{{ s2i_test_repo_root }}/.tmp/build-contexts/cyborg/cyborg/src/overrides/os-resource-classes/fixture.txt"
+        - "{{ s2i_test_repo_root }}/.tmp/build-contexts/cyborg/cyborg-agent/src/overrides/os-resource-classes/fixture.txt"
+        - "{{ s2i_test_repo_root }}/.tmp/build-contexts/watcher/watcher-base/source-package-map.effective.txt"
+        - "{{ s2i_test_repo_root }}/.tmp/build-contexts/watcher/watcher-base/requirements.lock.effective.master"
         - "{{ s2i_test_repo_root }}/.tmp/build-contexts/base/upper-constraints.txt.master"
         - "{{ s2i_test_logs }}/build-plan.json"
         - "{{ s2i_test_logs }}/source-placements.json"
@@ -38,19 +43,44 @@
         s2i_test_build_plan: >-
           {{ s2i_test_build_plan_data.content | b64decode | from_json }}
 
-    - name: Require deterministic explicit and inferred union
+    - name: Require deterministic direct and transitive union
       ansible.builtin.assert:
         that:
-          - s2i_test_build_plan.selection.reason == 'explicit+direct'
+          - s2i_test_build_plan.version == 3
+          - s2i_test_build_plan.selection.reason ==
+              'explicit+direct+transitive'
           - s2i_test_build_plan.selection.explicit_images ==
               ['watcher/watcher-base']
           - s2i_test_build_plan.selection.changed_projects ==
-              ['opendev.org/openstack/cyborg']
+              ['opendev.org/openstack/cyborg',
+               'opendev.org/openstack/os-resource-classes']
           - s2i_test_build_plan.selection.inferred_images ==
-              ['cyborg/cyborg', 'cyborg/cyborg-agent']
+              ['cyborg/cyborg', 'cyborg/cyborg-agent',
+               'watcher/watcher-base']
+          - s2i_test_build_plan.selection.transitive_affected_images_by_project['opendev.org/openstack/os-resource-classes'] ==
+              ['cyborg/cyborg', 'cyborg/cyborg-agent',
+               'watcher/watcher-base']
           - s2i_test_build_plan.images ==
               ['base', 'watcher/watcher-base', 'cyborg/cyborg',
                'cyborg/cyborg-agent']
+
+    - name: Load effective Watcher package inputs
+      ansible.builtin.slurp:
+        src: "{{ item }}"
+      loop:
+        - "{{ s2i_test_repo_root }}/.tmp/build-contexts/watcher/watcher-base/source-package-map.effective.txt"
+        - "{{ s2i_test_repo_root }}/.tmp/build-contexts/watcher/watcher-base/requirements.lock.effective.master"
+      register: s2i_test_effective_inputs
+
+    - name: Require exact planned package map and filtered lock
+      ansible.builtin.assert:
+        that:
+          - s2i_test_effective_inputs.results[0].content | b64decode ==
+              'watcher watcher\noverrides/os-resource-classes os-resource-classes\n'
+          - "'os-resource-classes==' not in
+              (s2i_test_effective_inputs.results[1].content | b64decode)"
+          - "'openstacksdk==' in
+              (s2i_test_effective_inputs.results[1].content | b64decode)"
 
     - name: Check copied repository metadata preservation
       ansible.builtin.stat:
@@ -88,15 +118,27 @@
               selectattr('actual_commit', 'equalto',
                          'requirements-actual-head') |
               list | length == 3
+          - s2i_test_source_manifest.sources |
+              selectattr('actual_commit', 'equalto',
+                         'os-resource-classes-actual-head') |
+              list | length == 3
+          - s2i_test_source_manifest.generated_files | length == 6
+          - s2i_test_source_manifest.source_packages |
+              selectattr('distribution', 'equalto', 'os-resource-classes') |
+              list | length == 3
 
     - name: Read original prepared workspace content
       ansible.builtin.slurp:
-        src: >-
-          {{ s2i_test_root }}/workspace/opendev.org/openstack/watcher/fixture.txt
-      register: s2i_test_original_watcher
+        src: "{{ item }}"
+      loop:
+        - "{{ s2i_test_root }}/workspace/opendev.org/openstack/watcher/fixture.txt"
+        - "{{ s2i_test_root }}/workspace/opendev.org/openstack/os-resource-classes/fixture.txt"
+      register: s2i_test_original_sources
 
-    - name: Require prepared workspace to remain unchanged
+    - name: Require prepared workspaces to remain unchanged
       ansible.builtin.assert:
         that:
-          - s2i_test_original_watcher.content | b64decode ==
+          - s2i_test_original_sources.results[0].content | b64decode ==
               'watcher speculative content\n'
+          - s2i_test_original_sources.results[1].content | b64decode ==
+              'os-resource-classes speculative content\n'
