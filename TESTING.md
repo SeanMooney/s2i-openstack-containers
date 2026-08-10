@@ -13,6 +13,16 @@ tox -e oib-plan -- --help
 tox -e oib-local -- --help
 ```
 
+Exercise direct selection cases while iterating with:
+
+```console
+tox -e unit -- -k SelectionTest
+```
+
+Selection coverage includes explicit targets, all-images fallback, direct
+Watcher and Cyborg changes, deterministic unions, malformed inputs, and the
+boundary that defers unmatched package dependencies.
+
 A real local lifecycle builds, publishes, validates, and cleans all images with
 pinned source checkouts:
 

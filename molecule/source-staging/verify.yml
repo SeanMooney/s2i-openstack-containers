@@ -30,6 +30,32 @@
           - s2i_test_staged_files.results |
               selectattr('stat.exists', 'equalto', false) | list | length == 0
 
+    - name: Load direct-selection build plan
+      ansible.builtin.slurp:
+        src: "{{ s2i_test_logs }}/build-plan.json"
+      register: s2i_test_build_plan_data
+
+    - name: Decode direct-selection build plan
+      ansible.builtin.set_fact:
+        s2i_test_build_plan: >-
+          {{ s2i_test_build_plan_data.content | b64decode | from_json }}
+
+    - name: Require deterministic explicit and inferred union
+      ansible.builtin.assert:
+        that:
+          - s2i_test_build_plan.selection.reason == 'explicit+direct'
+          - s2i_test_build_plan.selection.explicit_images ==
+              ['watcher/watcher-base']
+          - s2i_test_build_plan.selection.changed_projects ==
+              ['opendev.org/openstack/cyborg',
+               'opendev.org/openstack/glance']
+          - s2i_test_build_plan.selection.inferred_images ==
+              ['cyborg/cyborg', 'cyborg/cyborg-agent',
+               'glance/glance-api']
+          - s2i_test_build_plan.images ==
+              ['base', 'watcher/watcher-base', 'cyborg/cyborg',
+               'cyborg/cyborg-agent', 'glance/glance-api']
+
     - name: Check copied repository metadata preservation
       ansible.builtin.stat:
         path: >-

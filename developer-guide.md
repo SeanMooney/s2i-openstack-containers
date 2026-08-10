@@ -485,20 +485,44 @@ validation, builds, publication, result generation, and cleanup target that
 host explicitly. The Zuul executor controls Ansible but does not perform those
 mutations.
 
-The provider accepts an explicit image list whose source repositories are
-available through the job's `required-projects`. The job definition is the
-source of truth for those concrete inputs, and child jobs may supply a different
-compatible set. `build.sh` automatically places `base` first for the resulting
-comma-separated selection. Existing single-image, project, and `all` shell
-targets keep their standalone behavior.
+The provider accepts explicit image targets and can augment them from changes
+in prepared projects. The job definition remains the source of truth for
+concrete defaults and `required-projects`; child jobs may supply a different
+compatible set. OIB applies these rules:
+
+1. preserve non-empty explicit image targets in request order;
+2. infer images whose effective `sources.txt` repository records name projects
+   in the speculative Zuul item sequence;
+3. build the required base, then the deterministic union of explicit and
+   inferred service images; and
+4. build all images when neither an explicit image nor an external changed
+   project exists.
+
+For example, an explicit Watcher target builds consolidated Watcher and its
+base when no external project changed. A direct Cyborg change selects both
+Cyborg images because their shared project manifest supplies source to both
+contexts. Combining those inputs produces Watcher followed by both inferred
+Cyborg images without duplicates.
+
+Direct matching considers repository source records only. A constraints record
+is not a primary service source, and package-level transitive matching is
+outside this direct-selection contract. An external project with no direct
+match fails clearly rather than silently building an unrelated image set. A job
+can disable inference, but it must then supply a non-empty explicit image list.
+
+`build.sh` receives one comma-separated expression from the resulting immutable
+plan and automatically retains the required base. Existing single-image,
+project, and `all` shell targets keep their standalone behavior.
 
 ### Planning and speculative source staging
 
 The installed `oib plan` command is a side-effect-free planning boundary. It
-reads the explicit image list, `sources.txt`, mandatory `image.yaml` files,
-optional inventory mappings, and `zuul.projects`. Its atomic JSON output records
-ordered images, context scopes, deployment keys, source destinations, declared
-refs and maintained pins, inventory commits, and the
+reads explicit image inputs, the Zuul item sequence, `sources.txt`, mandatory
+`image.yaml` files, optional inventory mappings, and `zuul.projects`. Its atomic
+version 2 JSON output includes selection reason, explicit images, changed
+projects, inferred images, affected images per project, final ordered images,
+context scopes, deployment keys, source destinations, declared refs and
+maintained pins, inventory commits, and the
 `zuul-prepared-workspace-head` authority reason. It does not fetch Git objects,
 copy repositories, assemble contexts, invoke Ansible or Buildah, publish
 images, or perform cleanup.
@@ -661,7 +685,9 @@ and generated dependency movement.
 
 1. Create `containers/<project>/<image>/Containerfile`.
 2. Add its runtime and build dependency files.
-3. Add project-level or image-level source records as appropriate.
+3. Add project-level or image-level source records as appropriate. A repository
+   source in the project manifest directly selects every image in that project;
+   use an image manifest when only one image consumes that primary source.
 4. Add an image `src/.gitkeep` only when an image-level source directory is
    needed.
 5. Run source generation for the project.
@@ -671,6 +697,22 @@ and generated dependency movement.
 Follow an existing service Containerfile with similar runtime behavior. Keep
 build-only packages out of `bindeps.txt`, and keep runtime packages out of
 `builddeps.txt` unless they are genuinely needed in both stages.
+
+## Adding a direct primary source
+
+Add the five-field repository record to the narrowest `sources.txt` scope that
+consumes it, add that canonical project to the provider job's
+`required-projects`, and ensure its prepared checkout appears in
+`zuul.projects`. A project-scoped record affects every image in that project;
+an image-scoped record affects only that image. Do not add a package-only
+library here merely to trigger an image--that requires the separate transitive
+source-selection contract.
+
+Validate the planner with a Zuul item for the new project. Confirm the selection
+manifest records the canonical changed project, the exact affected images, and
+the expected deterministic final order. Then run source-staging Molecule and a
+real selective provider build. Add deployment keys to `image.yaml` only when
+the umbrella API actually exposes those fields.
 
 # Part V - Testing and Validation
 

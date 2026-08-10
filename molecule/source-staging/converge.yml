@@ -13,12 +13,18 @@
     s2i_ci_container_project: github.com/example/s2i-openstack-containers
     s2i_ci_images:
       - watcher/watcher-base
-      - cyborg/cyborg
-      - cyborg/cyborg-agent
-      - glance/glance-api
     s2i_ci_stream: master
     s2i_ci_image_mappings: {}
     zuul:
+      project:
+        canonical_name: github.com/example/s2i-openstack-containers
+      items:
+        - project:
+            canonical_name: github.com/example/s2i-openstack-containers
+        - project:
+            canonical_name: opendev.org/openstack/cyborg
+        - project:
+            canonical_name: opendev.org/openstack/glance
       projects:
         github.com/example/s2i-openstack-containers:
           src_dir: "{{ s2i_test_repo_name }}"
