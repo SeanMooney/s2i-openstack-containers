@@ -1,0 +1,168 @@
+---
+- name: Start an explicitly owned local buildset registry
+  hosts: builder
+  gather_facts: false
+  vars:
+    s2i_ci_local_registry_name: s2i_ci_registry
+    s2i_ci_registry_image: >-
+      quay.io/zuul-ci/zuul-registry@sha256:0bc02a2eed546daa570ebb18829579057cefceefd9ee15660dcf5a1a752d8f78
+
+  tasks:
+    - name: Canonicalize the local repository root
+      ansible.builtin.command:
+        argv: [realpath, --canonicalize-existing, "{{ s2i_ci_repo_root }}"]
+      register: s2i_ci_local_repo_realpath
+      changed_when: false
+
+    - name: Canonicalize the prospective registry root
+      ansible.builtin.command:
+        argv: [realpath, --canonicalize-missing, "{{ s2i_ci_registry_root }}"]
+      register: s2i_ci_local_registry_realpath
+      changed_when: false
+
+    - name: Require a safe repository-local registry root
+      ansible.builtin.assert:
+        that:
+          - s2i_ci_local_registry_realpath.stdout.startswith(
+              s2i_ci_local_repo_realpath.stdout + '/.tmp/')
+          - s2i_ci_registry_port | int > 1024
+          - s2i_ci_registry_port | int < 65536
+
+    - name: Check the explicitly named registry container
+      ansible.builtin.command:
+        argv: [podman, container, exists, "{{ s2i_ci_local_registry_name }}"]
+      register: s2i_ci_local_registry_existing
+      changed_when: false
+      failed_when: s2i_ci_local_registry_existing.rc not in [0, 1]
+
+    - name: Refuse to replace a pre-existing registry container
+      ansible.builtin.assert:
+        that:
+          - s2i_ci_local_registry_existing.rc == 1
+        fail_msg: >-
+          Refusing to replace pre-existing container
+          {{ s2i_ci_local_registry_name }}
+
+    - name: Check OpenSSL is available
+      ansible.builtin.command: openssl version
+      changed_when: false
+
+    - name: Prepare local registry directories
+      ansible.builtin.file:
+        path: "{{ s2i_ci_registry_root }}/{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - conf
+        - tls
+        - certs.d
+        - storage
+
+    - name: Generate local registry password
+      ansible.builtin.command:
+        argv: [openssl, rand, -hex, "24"]
+      register: s2i_ci_registry_password_command
+      changed_when: false
+      no_log: true
+
+    - name: Generate local registry secret
+      ansible.builtin.command:
+        argv: [openssl, rand, -hex, "32"]
+      register: s2i_ci_registry_secret_command
+      changed_when: false
+      no_log: true
+
+    - name: Record local registry credentials
+      ansible.builtin.set_fact:
+        s2i_ci_registry_password: >-
+          {{ s2i_ci_registry_password_command.stdout }}
+        s2i_ci_registry_secret: "{{ s2i_ci_registry_secret_command.stdout }}"
+      no_log: true
+
+    - name: Write the local Zuul registry configuration
+      ansible.builtin.copy:
+        dest: "{{ s2i_ci_registry_root }}/conf/registry.yaml"
+        mode: "0600"
+        content: |
+          registry:
+            address: '::'
+            port: 5000
+            public-url: 'https://127.0.0.1:{{ s2i_ci_registry_port }}'
+            tls-cert: /tls/cert.pem
+            tls-key: /tls/cert.key
+            secret: "{{ s2i_ci_registry_secret }}"
+            users:
+              - name: zuul
+                pass: "{{ s2i_ci_registry_password }}"
+                access: write
+            storage:
+              driver: filesystem
+              root: /storage
+      no_log: true
+
+    - name: Generate the local registry TLS certificate
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - req
+          - -x509
+          - -newkey
+          - rsa:2048
+          - -keyout
+          - "{{ s2i_ci_registry_root }}/tls/cert.key"
+          - -out
+          - "{{ s2i_ci_registry_root }}/tls/cert.pem"
+          - -days
+          - "30"
+          - -nodes
+          - -subj
+          - /CN=localhost
+          - -addext
+          - subjectAltName = IP:127.0.0.1,DNS:localhost
+      changed_when: true
+
+    - name: Install the local registry CA for explicit Podman operations
+      ansible.builtin.copy:
+        src: "{{ s2i_ci_registry_root }}/tls/cert.pem"
+        dest: "{{ s2i_ci_registry_root }}/certs.d/ca.crt"
+        remote_src: true
+        mode: "0644"
+
+    - name: Write private local registry connection data
+      ansible.builtin.copy:
+        dest: "{{ s2i_ci_registry_root }}/connection.json"
+        mode: "0600"
+        content: |
+          {{ {
+               'host': 'localhost',
+               'public_host': '127.0.0.1',
+               'port': s2i_ci_registry_port,
+               'username': 'zuul',
+               'password': s2i_ci_registry_password,
+               'cert_dir': s2i_ci_registry_root + '/certs.d',
+               'auth_file': s2i_ci_registry_root + '/auth.json'
+             } | to_nice_json }}
+      no_log: true
+
+    # Keep container creation last. The lifecycle records ownership as soon as
+    # this play returns, before it performs readiness or connection checks.
+    - name: Start the local Zuul registry container
+      ansible.builtin.command:
+        argv:
+          - podman
+          - run
+          - --detach
+          - --name
+          - "{{ s2i_ci_local_registry_name }}"
+          - --publish
+          - "127.0.0.1:{{ s2i_ci_registry_port }}:5000"
+          - --volume
+          - "{{ s2i_ci_registry_root }}/tls:/tls:Z"
+          - --volume
+          - "{{ s2i_ci_registry_root }}/conf:/conf:Z"
+          - --volume
+          - "{{ s2i_ci_registry_root }}/storage:/storage:Z"
+          - "{{ s2i_ci_registry_image }}"
+          - zuul-registry
+          - -d
+      changed_when: true

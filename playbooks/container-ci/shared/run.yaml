@@ -94,6 +94,11 @@
               s2i_ci_selected_images | sort
           - s2i_ci_prepared_contexts.stat.isdir | default(false)
 
+    - name: Resolve the complete shell backend target expression
+      ansible.builtin.set_fact:
+        s2i_ci_backend_target_expression: >-
+          {{ s2i_ci_selected_images | join(',') }}
+
     - name: Load the normalized registry connection
       ansible.builtin.slurp:
         src: "{{ s2i_ci_registry_connection_file }}"
@@ -123,7 +128,7 @@
         argv:
           - "{{ s2i_ci_container_repo }}/build.sh"
           - refs
-          - "{{ s2i_ci_target_expression }}"
+          - "{{ s2i_ci_backend_target_expression }}"
         chdir: "{{ s2i_ci_container_repo }}"
       environment:
         STREAM: "{{ s2i_ci_stream }}"
@@ -160,7 +165,8 @@
                'namespace': s2i_ci_namespace,
                'images': s2i_ci_intended_images,
                'selected_images': s2i_ci_selected_images,
-               'target': s2i_ci_target_expression
+               'target': s2i_ci_target_expression,
+               'backend_target': s2i_ci_backend_target_expression
              } | to_nice_json }}
 
     - name: Build selected images from prepared source contexts
@@ -168,7 +174,7 @@
         argv:
           - "{{ s2i_ci_container_repo }}/build.sh"
           - build-parallel
-          - "{{ s2i_ci_target_expression }}"
+          - "{{ s2i_ci_backend_target_expression }}"
         chdir: "{{ s2i_ci_container_repo }}"
       environment:
         STREAM: "{{ s2i_ci_stream }}"
@@ -195,7 +201,7 @@
         argv:
           - "{{ s2i_ci_container_repo }}/build.sh"
           - push
-          - "{{ s2i_ci_target_expression }}"
+          - "{{ s2i_ci_backend_target_expression }}"
         chdir: "{{ s2i_ci_container_repo }}"
       environment:
         STREAM: "{{ s2i_ci_stream }}"
@@ -220,7 +226,7 @@
         argv:
           - "{{ s2i_ci_container_repo }}/build.sh"
           - refs
-          - "{{ s2i_ci_target_expression }}"
+          - "{{ s2i_ci_backend_target_expression }}"
         chdir: "{{ s2i_ci_container_repo }}"
       environment:
         STREAM: "{{ s2i_ci_stream }}"
