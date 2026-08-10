@@ -19,3 +19,20 @@ Follow the OpenStack Hacking import conventions:
 - Use stdlib `unittest`, never pytest or Bash, for non-Ansible tests.
 - Do not add new shell test harnesses.
 - Run tests through tox and keep generated state below `.tmp/`.
+
+## Documentation
+
+- Keep documentation evergreen: explain purpose, behavior, invariants, and
+  rationale instead of duplicating current job configuration, lint rules, or
+  other authoritative configuration files.
+- Use specific examples to demonstrate a feature, but keep them representative
+  rather than exhaustive. Point readers to the owning configuration file for
+  the current concrete values.
+
+## Container CI ownership
+
+- Every mutating play below `playbooks/container-ci/{shared,zuul,local}/`
+  targets `hosts: builder`; do not move builder work to `all`, `localhost`, or
+  controller-side delegation.
+- Zuul maps `builder` to its Nodepool host. OIB-local maps the `builder` group
+  to exactly localhost with `ansible_connection: local`.

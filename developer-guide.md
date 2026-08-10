@@ -201,6 +201,18 @@ STREAM=master tox -e custom -- build cyborg/cyborg-agent
 A project target builds all images in that project. An image target builds only
 that image and its required base.
 
+For a complete job-like local lifecycle, use the installed OIB adapter:
+
+```console
+tox -e oib-local -- ci
+```
+
+OIB prepares pinned repositories and a local `builder` inventory, starts an
+owned ephemeral registry, invokes the shared Ansible preparation and run
+playbooks, and always cleans owned runtime resources. Konflux remains the
+production publication authority; OIB-local produces developer validation
+images and retained diagnostic manifests.
+
 ## Quick start: run checks
 
 ```console
@@ -250,6 +262,30 @@ a local experiment.
 
 That override is powerful and visible only in the local filesystem. Remove it
 before claiming that a result came from maintained pins.
+
+OIB-local models a Zuul job with two separate layers:
+
+```text
+.tmp/local/git-cache/<canonical-name>.git   persistent bare object cache
+.tmp/local/workspace/src/<canonical-name>  disposable detached checkout
+```
+
+External projects and the exact `.zuul-jobs-ref` revision use locked,
+origin-validated bare caches. A cached maintained commit requires no network
+access. A miss fetches the exact object, with its declared ref as a fallback,
+and verifies the requested commit before creating a normal local clone. Cleanup
+preserves caches but removes disposable checkouts. Cache origins are never
+silently rewritten, and source URLs containing credentials are rejected. When
+multiple selected contexts declare different maintained commits for the same
+canonical project, the first base-first context supplies the one prepared
+checkout while every placement retains its own declared pin for diagnostics.
+
+The current container repository uses its existing Git object store. Developer
+mode overlays tracked files and non-ignored untracked files onto a detached HEAD
+clone while excluding `.tmp`, `.tox`, `.venv`, bytecode, and other generated
+state. `--strict-worktree` rejects any dirty state instead. The local source
+manifest records the base commit, authority reason, dirty checksum, copied-file
+checksums, exact external pins, and cache hit or fetch details.
 
 A transitive source override can be placed at:
 
@@ -381,6 +417,65 @@ STREAM=master REGISTRY=quay.io NAMESPACE=<namespace> \
 The push operation verifies that every expected local tag exists before it
 pushes any target. This command is an explicit contributor action. It does not
 change Konflux's production authority.
+
+## Local OIB lifecycle
+
+The local adapter exposes explicit phases through one installed command:
+
+```console
+tox -e oib-local -- prepare
+tox -e oib-local -- run
+tox -e oib-local -- cleanup
+tox -e oib-local -- ci
+```
+
+`prepare` fills `.tmp/local/workspace`, generates
+`.tmp/local/inventory.yaml`, materializes the pinned `zuul-jobs` role checkout,
+starts a named local registry, and validates its normalized connection. The
+inventory defines a `builder` group containing only `localhost` with
+`ansible_connection: local`; the same shared playbooks therefore mutate the
+local host through the same `hosts: builder` contract used by Zuul.
+
+`run` imports shared source planning/context assembly and shell-backed
+publication in one Ansible invocation. The shared playbook passes
+`S2I_CONTEXTS_ROOT` and `ERROR_ON_CLONE=1`, so prepared local builds cannot fall
+back to source cloning. `build.sh` remains the build, push, and exact-reference
+backend. The OIB adapter does not implement native image operations.
+
+`cleanup` is idempotent and accepts partially prepared state. It removes exact
+workflow image tags, the explicitly owned `s2i_ci_registry` container,
+credentials, inventory, role checkout, and workspace while preserving
+`.tmp/local/git-cache`, `.tmp/local/zuul-output`, and the atomic lifecycle state.
+`ci` composes all phases under `try/finally`. Add `--keep` to `ci` only when the
+workspace, registry, images, and credentials must remain for deliberate
+inspection; run `cleanup` afterward.
+
+The state transitions through `preparing`, `prepared`, `running`, `ran`, and
+`cleaned`, with failure states retained for diagnosis. Configuration selected
+by `prepare` is authoritative for later phases. Useful artifacts include:
+
+```text
+.tmp/local/state.json
+.tmp/local/source-manifest.json
+.tmp/local/zuul-output/logs/inventory.yaml
+.tmp/local/zuul-output/logs/container-build/build-plan.json
+.tmp/local/zuul-output/logs/container-build/source-placements.json
+.tmp/local/zuul-output/logs/container-build/build-contexts.json
+.tmp/local/zuul-output/logs/container-build/published-images.json
+```
+
+Inspect or deliberately maintain caches without running a build:
+
+```console
+tox -e oib-local -- cache inspect
+tox -e oib-local -- cache refresh
+tox -e oib-local -- cache prune
+tox -e oib-local -- cache --project opendev.org/openstack/watcher clear
+```
+
+Normal preparation never advances a source pin. Refresh only fetches the
+declared ref and still requires the maintained commit. Clear and prune validate
+the recorded credential-free origin and serialize against preparation.
 
 ## Selective Zuul content provider
 
@@ -675,6 +770,7 @@ files. Tool-created untracked state should remain below `.tmp/`.
 | Generator-owned constraints, lock, RPM, or symlink | pinned refresh, require no tracked diff |
 | Source-maintenance job or runtime | focused updater tests, pinned clean refresh with the default Python, stale-output failure |
 | base image or script | unit, linter, build all service images |
+| OIB-local cache/workspace/lifecycle | unit, linter, Molecule, phased and full local lifecycle |
 | GitHub workflow | YAML/linter checks and workflow review |
 
 ## Build uses an unexpected source revision
@@ -732,6 +828,25 @@ STREAM=master BUILD_LOGS_DIR=.tmp/build-logs \
 Parallel service output is prefixed by image and streamed while each build
 runs. The command preserves the failing exit status, stops outstanding builds,
 and reports the log directory without replaying every successful log.
+
+## A local OIB phase fails
+
+Read `.tmp/local/state.json` first, then the source manifest, inventory, and
+container-build artifacts in the order printed by the command. `failed` means
+prepare or run stopped; `cleanup-failed` means exact image or registry cleanup
+must be corrected and retried. `oib local cleanup` can recover partial state and
+preserves caches and output for diagnosis.
+
+An origin mismatch is intentional protection against reusing an unrelated bare
+cache. Inspect the cache, clear only the named project when the recorded source
+URL is genuinely obsolete, and prepare again. A missing pin on a cache hit
+indicates corruption; do not silently replace that cache. If preparation works
+offline, the source manifest should report `hit: true` for every external
+project and the pinned role checkout.
+
+`--keep` retains credentials and a running registry as well as images and the
+workspace. Always run cleanup when inspection ends. OIB refuses to replace a
+pre-existing container named `s2i_ci_registry`.
 
 ## Provider output or cleanup is incomplete
 

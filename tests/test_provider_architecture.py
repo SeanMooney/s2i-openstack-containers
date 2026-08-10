@@ -191,6 +191,8 @@ class ProviderArchitectureTest(unittest.TestCase):
         self.assertNotIn("validate-mapping-overrides.yaml", run)
         self.assertIn('S2I_CONTEXTS_ROOT: "{{ s2i_ci_contexts_root }}"', run)
         self.assertIn('ERROR_ON_CLONE: "1"', run)
+        self.assertIn("s2i_ci_selected_images | join(',')", run)
+        self.assertIn("s2i_ci_backend_target_expression", run)
 
     def test_return_contract_is_selective_and_secret_free(self):
         returned = self._read(
@@ -241,15 +243,18 @@ class ProviderArchitectureTest(unittest.TestCase):
             }.issubset(bindeps)
         )
 
-    def test_c3_has_planner_without_local_adapter(self):
+    def test_c4_local_adapter_does_not_leak_into_planner(self):
         planner = self.repo_root / "openstack_image_builder"
+        local_modules = planner / "local"
+        local_playbooks = self.container_ci / "local"
 
-        self.assertTrue(planner.is_dir())
-        self.assertFalse((planner / "local").exists())
-        self.assertFalse((self.container_ci / "local").exists())
+        self.assertTrue(local_modules.is_dir())
+        self.assertTrue(local_playbooks.is_dir())
         planner_content = "\n".join(
-            path.read_text(encoding="utf-8") for path in planner.glob("*.py")
+            (planner / name).read_text(encoding="utf-8")
+            for name in ("images.py", "plan.py", "projects.py", "sources.py")
         )
+        self.assertNotIn("openstack_image_builder.local", planner_content)
         for forbidden in (
             "shutil.copy",
             "subprocess",
@@ -257,6 +262,15 @@ class ProviderArchitectureTest(unittest.TestCase):
             "ansible-playbook",
         ):
             self.assertNotIn(forbidden, planner_content)
+
+    def test_local_lifecycle_reuses_shared_run_ownership(self):
+        local_run = self._read("playbooks/container-ci/local/run.yaml")
+        tox = self._read("tox.ini")
+
+        self.assertIn("../shared/prepare-sources.yaml", local_run)
+        self.assertIn("../shared/run.yaml", local_run)
+        self.assertIn("oib local {posargs}", tox)
+        self.assertNotIn("build.sh", local_run)
 
 
 if __name__ == "__main__":

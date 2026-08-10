@@ -46,5 +46,6 @@
       changed_when: false
 
     - name: Install Tox for the OIB planning environment
+      when: s2i_ci_install_tox | default(true) | bool
       ansible.builtin.include_role:
         name: ensure-tox

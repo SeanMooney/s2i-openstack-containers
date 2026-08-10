@@ -1,0 +1,25 @@
+---
+- name: Prepare local registry lifecycle fixtures
+  hosts: builder
+  gather_facts: false
+  vars:
+    s2i_test_repo_root: "{{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') }}"
+    s2i_test_root: "{{ s2i_test_repo_root }}/.tmp/molecule/local-registry"
+
+  tasks:
+    - name: Remove registry container left by an interrupted test
+      ansible.builtin.command:
+        argv: [podman, rm, --force, s2i_ci_registry]
+      changed_when: false
+      failed_when: false
+
+    - name: Reset local registry fixture state
+      ansible.builtin.file:
+        path: "{{ s2i_test_root }}"
+        state: absent
+
+    - name: Create local registry output directory
+      ansible.builtin.file:
+        path: "{{ s2i_test_root }}/zuul-output/logs/container-build"
+        state: directory
+        mode: "0755"

@@ -34,8 +34,10 @@
     parent: tox
     description: Run provider registry, staging, and cleanup scenarios.
     nodeset: s2i-openstack-containers-image-builder
+    pre-run: playbooks/container-ci/shared/prepare-host.yaml
     vars:
       python_version: "3.12"
+      s2i_ci_install_tox: false
       tox_envlist: molecule
 
 - nodeset:

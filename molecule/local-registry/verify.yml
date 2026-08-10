@@ -1,0 +1,53 @@
+---
+- name: Verify local registry lifecycle contracts
+  hosts: builder
+  gather_facts: false
+  vars:
+    s2i_test_repo_root: "{{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') }}"
+    s2i_test_root: "{{ s2i_test_repo_root }}/.tmp/molecule/local-registry"
+    s2i_test_output: "{{ s2i_test_root }}/zuul-output"
+
+  tasks:
+    - name: Check owned local registry container
+      ansible.builtin.command:
+        argv: [podman, container, exists, s2i_ci_registry]
+      changed_when: false
+
+    - name: Load normalized registry connection data
+      ansible.builtin.slurp:
+        src: "{{ s2i_test_output }}/.s2i-ci-registry-connection.json"
+      register: s2i_test_registry_connection_data
+
+    - name: Decode normalized registry connection data
+      ansible.builtin.set_fact:
+        s2i_test_registry_connection: >-
+          {{ s2i_test_registry_connection_data.content | b64decode | from_json }}
+
+    - name: Inspect explicit registry client state
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ s2i_test_registry_connection.auth_file }}"
+        - "{{ s2i_test_registry_connection.cert_dir }}"
+      register: s2i_test_registry_client_state
+
+    - name: Require public and builder-local registry endpoints
+      ansible.builtin.assert:
+        that:
+          - s2i_test_registry_connection.endpoint == 'localhost:15000'
+          - s2i_test_registry_connection.public_host == '127.0.0.1'
+          - s2i_test_registry_connection.public_port | int == 15000
+          - s2i_test_registry_client_state.results[0].stat.isreg |
+              default(false)
+          - s2i_test_registry_client_state.results[1].stat.isdir |
+              default(false)
+
+    - name: Check registry validation artifact
+      ansible.builtin.stat:
+        path: "{{ s2i_test_output }}/logs/container-build/registry-state.json"
+      register: s2i_test_registry_state
+
+    - name: Require registry validation artifact
+      ansible.builtin.assert:
+        that:
+          - s2i_test_registry_state.stat.isreg | default(false)

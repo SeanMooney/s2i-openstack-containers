@@ -14,9 +14,11 @@
 
 import argparse
 import json
+import subprocess
 import sys
 
 from openstack_image_builder import plan
+from openstack_image_builder.local import lifecycle
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -28,13 +30,23 @@ def create_parser() -> argparse.ArgumentParser:
     )
     plan.add_arguments(plan_parser)
     plan_parser.set_defaults(handler=plan.run)
+
+    local_parser = subparsers.add_parser(
+        "local", help="prepare and run a local Zuul-compatible lifecycle"
+    )
+    lifecycle.add_subcommands(local_parser)
     return parser
 
 
 def invoke(args: argparse.Namespace) -> int:
     try:
         args.handler(args)
-    except (json.JSONDecodeError, OSError, ValueError) as error:
+    except (
+        json.JSONDecodeError,
+        OSError,
+        subprocess.CalledProcessError,
+        ValueError,
+    ) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
     return 0
