@@ -29,8 +29,14 @@
     parent: base
     abstract: true
     description: |
-      Build and publish a maintained subset of OpenStack service container
-      images from speculative Zuul source checkouts for dependent jobs.
+      Build and publish speculative OpenStack service container images for
+      dependent jobs.
+
+      A non-empty ``s2i_ci_images`` list selects those images explicitly.
+      Projects in the speculative item sequence add the images whose
+      ``sources.txt`` repository records name those projects. The provider
+      builds the deterministic union and its required base. With neither an
+      explicit image nor an external changed project, it builds all images.
 
       The job uses the upstream container repository by default. A child job
       can add another container repository to ``required-projects`` and select
@@ -51,10 +57,8 @@
     vars:
       s2i_ci_container_project: >-
         github.com/openstack-k8s-operators/s2i-openstack-containers
-      s2i_ci_images:
-        - watcher/watcher-base
-        - cyborg/cyborg
-        - cyborg/cyborg-agent
+      s2i_ci_images: []
+      s2i_ci_infer_images_from_dependencies: true
       s2i_ci_stream: master
       s2i_ci_content_provider: true
       s2i_ci_reset_static_node: false
