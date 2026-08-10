@@ -22,10 +22,11 @@ import tempfile
 
 from openstack_image_builder import images
 from openstack_image_builder import projects
+from openstack_image_builder import selection
 from openstack_image_builder import sources
 
 
-PLAN_VERSION = 1
+PLAN_VERSION = 2
 
 
 def load_input(path: pathlib.Path) -> dict[str, object]:
@@ -57,9 +58,17 @@ def create(repo_root: pathlib.Path, value: dict[str, object]) -> dict[str, objec
     if not isinstance(project_values, dict):
         raise ValueError("plan input projects must be a JSON object")
 
-    selected, target_expression = images.ordered_selection(
-        containers_dir, value.get("images")
+    selected_data = selection.create(
+        repo_root=repo_root,
+        requested=value.get("images", []),
+        items=value.get("zuul_items", []),
+        primary_project=value.get("zuul_project"),
+        container_project=container_project,
+        stream=stream,
+        infer=value.get("infer_images", True),
     )
+    selected = selected_data["images"]
+    target_expression = selected_data["target_expression"]
     contexts = images.context_scopes(selected)
     metadata = images.effective_metadata(
         repo_root, selected, value.get("image_mappings", {})
@@ -96,6 +105,7 @@ def create(repo_root: pathlib.Path, value: dict[str, object]) -> dict[str, objec
         "workspace_root": workspace_root,
         "container_project": container_project,
         "stream": stream,
+        "selection": selected_data,
         "images": selected,
         "target_expression": target_expression,
         "contexts": contexts,

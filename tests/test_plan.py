@@ -55,6 +55,23 @@ class PlanTest(unittest.TestCase):
                 "cyborg/cyborg",
                 "cyborg/cyborg-agent",
             ],
+            "infer_images": True,
+            "zuul_items": [
+                {
+                    "project": {
+                        "canonical_name": (
+                            "github.com/openstack-k8s-operators/"
+                            "s2i-openstack-containers"
+                        )
+                    }
+                }
+            ],
+            "zuul_project": {
+                "canonical_name": (
+                    "github.com/openstack-k8s-operators/"
+                    "s2i-openstack-containers"
+                )
+            },
             "stream": "master",
             "image_mappings": {},
         }
@@ -77,6 +94,8 @@ class PlanTest(unittest.TestCase):
             result["target_expression"],
         )
         self.assertEqual(["base", "watcher", "cyborg"], result["contexts"])
+        self.assertEqual("explicit", result["selection"]["reason"])
+        self.assertEqual([], result["selection"]["changed_projects"])
         metadata = {item["image"]: item for item in result["image_metadata"]}
         self.assertEqual(
             [
@@ -111,6 +130,45 @@ class PlanTest(unittest.TestCase):
                 item["authority"] == "zuul-prepared-workspace-head"
                 for item in result["sources"]
             )
+        )
+
+    def test_direct_cyborg_plan_keeps_empty_deployment_mappings(self):
+        self.input["images"] = []
+        self.input["zuul_items"].append(
+            {"project": "opendev.org/openstack/cyborg"}
+        )
+
+        result = plan.create(self.repo_root, self.input)
+        metadata = {item["image"]: item for item in result["image_metadata"]}
+
+        self.assertEqual(
+            ["base", "cyborg/cyborg", "cyborg/cyborg-agent"],
+            result["images"],
+        )
+        self.assertEqual([], metadata["cyborg/cyborg"]["deployment_keys"])
+        self.assertEqual(
+            [], metadata["cyborg/cyborg-agent"]["deployment_keys"]
+        )
+
+    def test_direct_cyborg_inventory_mapping_opts_in_one_image(self):
+        self.input["images"] = []
+        self.input["zuul_items"].append(
+            {"project": "opendev.org/openstack/cyborg"}
+        )
+        self.input["image_mappings"] = {"cyborg/cyborg": ["futureCyborgImage"]}
+
+        result = plan.create(self.repo_root, self.input)
+        metadata = {item["image"]: item for item in result["image_metadata"]}
+
+        self.assertEqual(
+            ["futureCyborgImage"],
+            metadata["cyborg/cyborg"]["deployment_keys"],
+        )
+        self.assertEqual(
+            "inventory", metadata["cyborg/cyborg"]["mapping_source"]
+        )
+        self.assertEqual(
+            [], metadata["cyborg/cyborg-agent"]["deployment_keys"]
         )
 
     def test_inventory_mapping_replaces_tracked_keys(self):
@@ -219,7 +277,7 @@ class PlanTest(unittest.TestCase):
                 if path.is_file()
             }
             self.assertEqual(before, after)
-            self.assertEqual(1, json.loads(output_path.read_text())["version"])
+            self.assertEqual(2, json.loads(output_path.read_text())["version"])
             self.assertFalse(list(output_path.parent.glob(".plan.json.*")))
 
 

@@ -114,14 +114,14 @@ class ProviderArchitectureTest(unittest.TestCase):
         )
         self.assertNotIn("content-provider-return.yaml", shared)
 
-    def test_provider_job_keeps_explicit_builder_contract(self):
+    def test_provider_job_keeps_direct_selection_builder_contract(self):
         zuul = self._read(".zuul.yaml")
 
         self.assertIn("name: builder", zuul)
         self.assertIn("nodeset: s2i-openstack-containers-image-builder", zuul)
-        self.assertIn("- watcher/watcher-base", zuul)
-        self.assertIn("- cyborg/cyborg", zuul)
-        self.assertIn("- cyborg/cyborg-agent", zuul)
+        self.assertIn("s2i_ci_images: []", zuul)
+        self.assertIn("s2i_ci_infer_images_from_dependencies: true", zuul)
+        self.assertIn("deterministic union", zuul)
         self.assertNotIn("- project:", zuul)
 
     def test_provider_validates_repository_on_builder(self):
@@ -153,6 +153,10 @@ class ProviderArchitectureTest(unittest.TestCase):
         self.assertNotIn("s2i_ci_content_provider: false", zuul_run)
         self.assertNotIn("s2i_ci_install_host_packages: true", prepare_host)
         self.assertIn("s2i_ci_images | default([])", shared_run)
+        self.assertIn("s2i_ci_selected_images | length > 0", shared_run)
+        self.assertIn("s2i_ci_selected_images[0] == 'base'", shared_run)
+        self.assertIn("'^(base|[A-Za-z0-9_.-]+/", shared_run)
+        self.assertNotIn("s2i_ci_images | length > 0", shared_run)
         self.assertIn(
             "s2i_ci_content_provider | default(false) | bool", zuul_run
         )
@@ -234,7 +238,13 @@ class ProviderArchitectureTest(unittest.TestCase):
         self.assertTrue(local_playbooks.is_dir())
         planner_content = "\n".join(
             (planner / name).read_text(encoding="utf-8")
-            for name in ("images.py", "plan.py", "projects.py", "sources.py")
+            for name in (
+                "images.py",
+                "plan.py",
+                "projects.py",
+                "selection.py",
+                "sources.py",
+            )
         )
         self.assertNotIn("openstack_image_builder.local", planner_content)
         for forbidden in (
@@ -244,6 +254,19 @@ class ProviderArchitectureTest(unittest.TestCase):
             "ansible-playbook",
         ):
             self.assertNotIn(forbidden, planner_content)
+
+    def test_c5_plan_owns_direct_selection_without_transitive_parsing(self):
+        selection = self._read("openstack_image_builder/selection.py")
+        staging = self._read(
+            "playbooks/container-ci/shared/prepare-sources.yaml"
+        )
+
+        self.assertIn("directly_affected_images", selection)
+        self.assertIn("record[\"type\"] == \"repository\"", selection)
+        self.assertIn("'zuul_items': zuul['items'] | default([])", staging)
+        self.assertIn("s2i_ci_plan.version == 2", staging)
+        for forbidden in ("setup.py", "pyproject.toml", "requirements.lock"):
+            self.assertNotIn(forbidden, selection)
 
     def test_local_lifecycle_reuses_shared_run_ownership(self):
         local_run = self._read("playbooks/container-ci/local/run.yaml")
