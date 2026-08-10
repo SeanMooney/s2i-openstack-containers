@@ -1,0 +1,43 @@
+---
+- name: Remove explicitly owned local registry state
+  hosts: builder
+  gather_facts: false
+  vars:
+    s2i_ci_local_registry_name: s2i_ci_registry
+
+  tasks:
+    - name: Canonicalize the local repository root
+      ansible.builtin.command:
+        argv: [realpath, --canonicalize-existing, "{{ s2i_ci_repo_root }}"]
+      register: s2i_ci_local_repo_realpath
+      changed_when: false
+
+    - name: Canonicalize the prospective registry root
+      ansible.builtin.command:
+        argv: [realpath, --canonicalize-missing, "{{ s2i_ci_registry_root }}"]
+      register: s2i_ci_local_registry_realpath
+      changed_when: false
+
+    - name: Require safe local cleanup boundaries
+      ansible.builtin.assert:
+        that:
+          - s2i_ci_local_registry_name == 's2i_ci_registry'
+          - s2i_ci_local_registry_realpath.stdout.startswith(
+              s2i_ci_local_repo_realpath.stdout + '/.tmp/')
+
+    - name: Remove the explicitly owned local registry container
+      when: s2i_ci_local_registry_owned | default(false) | bool
+      ansible.builtin.command:
+        argv:
+          - podman
+          - rm
+          - --force
+          - "{{ s2i_ci_local_registry_name }}"
+      register: s2i_ci_removed_local_registry
+      changed_when: s2i_ci_removed_local_registry.rc == 0
+      failed_when: s2i_ci_removed_local_registry.rc not in [0, 1]
+
+    - name: Remove local registry filesystem state
+      ansible.builtin.file:
+        path: "{{ s2i_ci_registry_root }}"
+        state: absent

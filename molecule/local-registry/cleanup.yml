@@ -1,0 +1,21 @@
+---
+- name: Exercise owned local registry cleanup
+  ansible.builtin.import_playbook: ../../playbooks/container-ci/local/post.yaml
+  vars:
+    s2i_ci_cleanup_images: true
+    s2i_ci_local_registry_owned: true
+    s2i_ci_output_dir: >-
+      {{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') }}/.tmp/molecule/local-registry/zuul-output
+    s2i_ci_registry_root: >-
+      {{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') }}/.tmp/molecule/local-registry/registry
+    s2i_ci_repo_root: "{{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') }}"
+
+- name: Remove retained local registry fixture output
+  hosts: builder
+  gather_facts: false
+  tasks:
+    - name: Remove local registry fixture root
+      ansible.builtin.file:
+        path: >-
+          {{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') }}/.tmp/molecule/local-registry
+        state: absent

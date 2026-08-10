@@ -1,0 +1,6 @@
+---
+- name: Plan and stage pinned local source contexts
+  ansible.builtin.import_playbook: ../shared/prepare-sources.yaml
+
+- name: Run shared shell-backed image publication locally
+  ansible.builtin.import_playbook: ../shared/run.yaml

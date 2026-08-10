@@ -30,10 +30,18 @@ List the available image targets:
 ./build.sh list
 ```
 
-Build all images from the maintained `master` source pins:
+Build all images from the maintained `master` source pins through the direct
+shell path:
 
 ```console
 STREAM=master tox -e build
+```
+
+Run the complete local Zuul-compatible lifecycle with persistent Git caches,
+disposable pinned checkouts, an ephemeral registry, and failure-safe cleanup:
+
+```console
+tox -e oib-local -- ci
 ```
 
 Run the unit suite and repository checks:
@@ -50,6 +58,8 @@ build.sh                     build and source-maintenance implementation
 containers/base/             common openstack-base image
 containers/cyborg/           Cyborg sources and image contexts
 containers/watcher/          Watcher sources and image context
+openstack_image_builder/      OIB planner and local lifecycle adapters
+playbooks/container-ci/       shared, Zuul, and local Ansible entry points
 tests/                       stdlib unittest suite
 tox.ini                      contributor command environments
 developer-guide.md           architecture and workflow reference

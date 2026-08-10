@@ -1,0 +1,33 @@
+---
+- name: Collect logs from the explicitly owned local registry
+  hosts: builder
+  gather_facts: false
+  vars:
+    s2i_ci_local_registry_name: s2i_ci_registry
+    s2i_ci_log_dir: "{{ s2i_ci_output_dir }}/logs/container-build"
+
+  tasks:
+    - name: Ensure the retained local log directory exists
+      ansible.builtin.file:
+        path: "{{ s2i_ci_log_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Read owned local registry logs
+      when: s2i_ci_local_registry_owned | default(false) | bool
+      ansible.builtin.command:
+        argv: [podman, logs, "{{ s2i_ci_local_registry_name }}"]
+      register: s2i_ci_local_registry_logs
+      changed_when: false
+      failed_when: false
+
+    - name: Save owned local registry logs
+      when:
+        - s2i_ci_local_registry_owned | default(false) | bool
+        - s2i_ci_local_registry_logs.rc == 0
+      ansible.builtin.copy:
+        dest: "{{ s2i_ci_log_dir }}/{{ s2i_ci_local_registry_name }}.log"
+        mode: "0644"
+        content: |-
+          {{ s2i_ci_local_registry_logs.stdout }}
+          {{ s2i_ci_local_registry_logs.stderr }}
