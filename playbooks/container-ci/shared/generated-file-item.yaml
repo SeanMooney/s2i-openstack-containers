@@ -1,0 +1,81 @@
+---
+- name: Require a safe planned generated file
+  ansible.builtin.assert:
+    that:
+      - s2i_ci_planned_file.destination is string
+      - s2i_ci_planned_file.destination | length > 0
+      - not s2i_ci_planned_file.destination.startswith('/')
+      - "'/../' not in '/' + s2i_ci_planned_file.destination + '/'"
+      - "'/./' not in '/' + s2i_ci_planned_file.destination + '/'"
+      - s2i_ci_planned_file.content is string
+      - s2i_ci_planned_file.sha256 is string
+      - s2i_ci_planned_file.content | hash('sha256') ==
+          s2i_ci_planned_file.sha256
+    fail_msg: Planned generated file is malformed or unsafe
+
+- name: Resolve planned generated file path
+  ansible.builtin.set_fact:
+    s2i_ci_generated_destination: >-
+      {{ s2i_ci_contexts_assembly }}/{{ s2i_ci_planned_file.destination }}
+
+- name: Canonicalize existing planned generated file parent
+  ansible.builtin.command:
+    argv:
+      - realpath
+      - --canonicalize-existing
+      - "{{ s2i_ci_generated_destination | dirname }}"
+  register: s2i_ci_generated_parent_realpath
+  changed_when: false
+  failed_when: false
+
+- name: Require existing generated file parent beneath assembly root
+  ansible.builtin.assert:
+    that:
+      - s2i_ci_generated_parent_realpath.rc == 0
+      - s2i_ci_generated_parent_realpath.stdout.startswith(
+          s2i_ci_contexts_assembly_realpath.stdout + '/')
+
+- name: Materialize planned generated file
+  ansible.builtin.copy:
+    dest: "{{ s2i_ci_generated_destination }}"
+    mode: "0644"
+    content: "{{ s2i_ci_planned_file.content }}"
+
+- name: Canonicalize materialized generated file
+  ansible.builtin.command:
+    argv:
+      - realpath
+      - --canonicalize-existing
+      - "{{ s2i_ci_generated_destination }}"
+  register: s2i_ci_generated_file_realpath
+  changed_when: false
+  failed_when: false
+
+- name: Load materialized generated file
+  ansible.builtin.slurp:
+    src: "{{ s2i_ci_generated_destination }}"
+  register: s2i_ci_generated_file_data
+
+- name: Require exact generated file materialization
+  ansible.builtin.assert:
+    that:
+      - s2i_ci_generated_file_realpath.rc == 0
+      - s2i_ci_generated_file_realpath.stdout.startswith(
+          s2i_ci_contexts_assembly_realpath.stdout + '/')
+      - s2i_ci_generated_file_data.content | b64decode | hash('sha256') ==
+          s2i_ci_planned_file.sha256
+
+- name: Record materialized generated file
+  ansible.builtin.set_fact:
+    s2i_ci_generated_files: >-
+      {{ s2i_ci_generated_files +
+         [{
+           'image': s2i_ci_planned_file.image,
+           'kind': s2i_ci_planned_file.kind,
+           'source': s2i_ci_planned_file.source,
+           'excluded_distributions':
+             s2i_ci_planned_file.excluded_distributions,
+           'sha256': s2i_ci_planned_file.sha256,
+           'destination':
+             '.tmp/build-contexts/' + s2i_ci_planned_file.destination
+         }] }}

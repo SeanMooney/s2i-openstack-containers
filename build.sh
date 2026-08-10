@@ -392,21 +392,34 @@ build_image() {
     return 1
   fi
 
-  # Prefer the configured stream constraints and forbid prepared fallbacks.
+  # Prepared builds require OIB-planned per-image package inputs. Standalone
+  # builds retain the committed project lock and tracked direct-source map.
+  local image_dir="${dir_name#*/}"
   local build_constraints="${CONSTRAINTS_FILE}.${STREAM}"
-  local lock_file="${context_dir}/${build_constraints}"
-  if [[ ! -f "${lock_file}" ]]; then
-    if [[ -n "${S2I_CONTEXTS_ROOT}" ]]; then
-      echo "ERROR: Prepared constraints not found at ${lock_file}" >&2
-      return 1
-    fi
+  local source_package_map="${image_dir}/source-package-map.txt"
+  if [[ -n "${S2I_CONTEXTS_ROOT}" ]]; then
+    build_constraints="${image_dir}/requirements.lock.effective.${STREAM}"
+    source_package_map="${image_dir}/source-package-map.effective.txt"
+    local prepared_input
+    for prepared_input in "${build_constraints}" "${source_package_map}"; do
+      if [[ ! -f "${context_dir}/${prepared_input}" ]]; then
+        echo "ERROR: Prepared package input not found at ${context_dir}/${prepared_input}" >&2
+        return 1
+      fi
+    done
+  elif [[ ! -f "${context_dir}/${build_constraints}" ]]; then
     ensure_project_constraints "${project}" "${STREAM}"
     build_constraints="${UPSTREAM_CONSTRAINTS}.${STREAM}"
+  fi
+  if [[ ! -f "${context_dir}/${source_package_map}" ]]; then
+    echo "ERROR: Source package map not found at ${context_dir}/${source_package_map}" >&2
+    return 1
   fi
 
   buildah bud \
     $(image_tag_args "${dir_name}") \
     --build-arg "CONSTRAINTS_FILE=${build_constraints}" \
+    --build-arg "SOURCE_PACKAGE_MAP=${source_package_map}" \
     --build-arg "BASE_IMAGE=${BASE_IMAGE}" \
     ${PIP_NO_BINARY:+--build-arg "PIP_NO_BINARY=${PIP_NO_BINARY}"} \
     -f "${containerfile}" \
