@@ -24,7 +24,7 @@
         - project:
             canonical_name: opendev.org/openstack/cyborg
         - project:
-            canonical_name: opendev.org/openstack/glance
+            canonical_name: opendev.org/openstack/os-resource-classes
       projects:
         github.com/example/s2i-openstack-containers:
           src_dir: "{{ s2i_test_repo_name }}"
@@ -45,3 +45,7 @@
           src_dir: >-
             {{ s2i_test_repo_name }}/.tmp/molecule/source-staging/workspace/opendev.org/openstack/glance
           commit: glance-inventory-head
+        opendev.org/openstack/os-resource-classes:
+          src_dir: >-
+            {{ s2i_test_repo_name }}/.tmp/molecule/source-staging/workspace/opendev.org/openstack/os-resource-classes
+          commit: os-resource-classes-inventory-head

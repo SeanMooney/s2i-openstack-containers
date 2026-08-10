@@ -49,6 +49,9 @@ class ProviderShellTest(unittest.TestCase):
                 (project_root / "src" / project).mkdir(
                     parents=True, exist_ok=True
                 )
+                (image_root / "source-package-map.txt").write_text(
+                    f"{project} {project}\n", encoding="utf-8"
+                )
 
     def _create_fake_buildah(self):
         fake = self.bin_dir / "buildah"

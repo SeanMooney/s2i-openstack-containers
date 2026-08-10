@@ -28,6 +28,7 @@
         - opendev.org/openstack/watcher
         - opendev.org/openstack/cyborg
         - opendev.org/openstack/glance
+        - opendev.org/openstack/os-resource-classes
 
     - name: Create fake command directory
       ansible.builtin.file:
@@ -65,3 +66,24 @@
         - watcher
         - cyborg
         - glance
+        - os-resource-classes
+
+    - name: Write static prepared package metadata
+      ansible.builtin.copy:
+        dest: >-
+          {{ s2i_test_workspace }}/opendev.org/openstack/{{ item.project }}/setup.cfg
+        mode: "0644"
+        content: |
+          [metadata]
+          name = {{ item.distribution }}
+      loop:
+        - project: watcher
+          distribution: watcher
+        - project: cyborg
+          distribution: cyborg
+        - project: glance
+          distribution: glance
+        - project: os-resource-classes
+          distribution: OS_Resource.Classes
+      loop_control:
+        label: "{{ item.project }}"

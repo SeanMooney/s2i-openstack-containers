@@ -54,10 +54,11 @@
       dependent jobs.
 
       A non-empty ``s2i_ci_images`` list selects those images explicitly.
-      Projects in the speculative item sequence add the images whose
-      ``sources.txt`` repository records name those projects. The provider
-      builds the deterministic union and its required base. With neither an
-      explicit image nor an external changed project, it builds all images.
+      Projects in the speculative item sequence add images through direct
+      ``sources.txt`` repository records or static Python distribution matches
+      against image dependency inputs. Their deterministic union and its
+      required base are built. With neither an explicit image nor an
+      external changed project, it builds all images.
 
       The upstream job explicitly selects Watcher and Glance while those are
       the service projects registered in this tenant. A child job can broaden

@@ -70,6 +70,12 @@ class BuildPreparedContextsTest(unittest.TestCase):
                 (image_dir / "Containerfile").write_text(
                     "FROM scratch\n", encoding="utf-8"
                 )
+                (image_dir / "requirements.lock.effective.master").write_text(
+                    "effective constraints\n", encoding="utf-8"
+                )
+                (image_dir / "source-package-map.effective.txt").write_text(
+                    f"{project} {project}\n", encoding="utf-8"
+                )
 
     def _create_commands(self):
         self.fake_bin.mkdir()
@@ -125,12 +131,42 @@ class BuildPreparedContextsTest(unittest.TestCase):
                     for command in commands
                 )
             )
+        service_commands = [
+            command for command in commands if "openstack-base" not in command
+        ]
         self.assertTrue(
             all(
-                "CONSTRAINTS_FILE=requirements.lock.master" in command
-                for command in commands
+                "requirements.lock.effective.master" in command
+                and "source-package-map.effective.txt" in command
+                for command in service_commands
             )
         )
+        self.assertTrue(
+            any(
+                "CONSTRAINTS_FILE=requirements.lock.master" in command
+                for command in commands
+                if "openstack-base" in command
+            )
+        )
+
+    def test_missing_prepared_package_inputs_never_fall_back(self):
+        for filename in (
+            "requirements.lock.effective.master",
+            "source-package-map.effective.txt",
+        ):
+            with self.subTest(filename=filename):
+                path = self.contexts / "watcher" / "watcher-base" / filename
+                content = path.read_text(encoding="utf-8")
+                path.unlink()
+                result, commands = self._run(check=False)
+                path.write_text(content, encoding="utf-8")
+
+                self.assertNotEqual(0, result.returncode)
+                self.assertIn(
+                    "Prepared package input not found",
+                    result.stdout + result.stderr,
+                )
+                self.assertLess(len(commands), 4)
 
     def test_glance_strict_prepared_build_uses_isolated_context(self):
         _result, commands = self._run(targets="base,glance/glance-api")
@@ -139,11 +175,24 @@ class BuildPreparedContextsTest(unittest.TestCase):
         self.assertTrue(
             any(f" {self.contexts}/glance/" in command for command in commands)
         )
-        self.assertTrue(
-            all(
-                "CONSTRAINTS_FILE=requirements.lock.master" in command
-                for command in commands
-            )
+        base_command = next(
+            command for command in commands if "openstack-base" in command
+        )
+        glance_command = next(
+            command
+            for command in commands
+            if "openstack-glance-api" in command
+        )
+        self.assertIn(
+            "CONSTRAINTS_FILE=requirements.lock.master", base_command
+        )
+        self.assertIn(
+            "CONSTRAINTS_FILE=glance-api/requirements.lock.effective.master",
+            glance_command,
+        )
+        self.assertIn(
+            "SOURCE_PACKAGE_MAP=glance-api/source-package-map.effective.txt",
+            glance_command,
         )
 
     def test_missing_prepared_source_never_falls_back_to_clone(self):

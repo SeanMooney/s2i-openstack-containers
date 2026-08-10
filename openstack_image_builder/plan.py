@@ -20,13 +20,15 @@ import os
 import pathlib
 import tempfile
 
+from openstack_image_builder import dependencies
 from openstack_image_builder import images
+from openstack_image_builder import packages
 from openstack_image_builder import projects
 from openstack_image_builder import selection
 from openstack_image_builder import sources
 
 
-PLAN_VERSION = 2
+PLAN_VERSION = 3
 
 
 def load_input(path: pathlib.Path) -> dict[str, object]:
@@ -44,7 +46,7 @@ def required_string(value: dict[str, object], key: str) -> str:
 
 
 def create(repo_root: pathlib.Path, value: dict[str, object]) -> dict[str, object]:
-    """Create a plan without reading or changing prepared source checkouts."""
+    """Create a plan by reading, but never changing, prepared checkouts."""
     containers_dir = repo_root / "containers"
     if not containers_dir.is_dir():
         raise ValueError(f"repository has no containers directory: {repo_root}")
@@ -58,6 +60,30 @@ def create(repo_root: pathlib.Path, value: dict[str, object]) -> dict[str, objec
     if not isinstance(project_values, dict):
         raise ValueError("plan input projects must be a JSON object")
 
+    changed = selection.changed_projects(
+        value.get("zuul_items", []),
+        value.get("zuul_project"),
+        container_project,
+    )
+    direct_affected: dict[str, list[str]] = {}
+    unmatched: list[str] = []
+    if value.get("infer_images", True) is True:
+        for canonical_name in changed:
+            matched = selection.directly_affected_images(
+                repo_root, canonical_name, stream
+            )
+            if matched:
+                direct_affected[canonical_name] = matched
+            else:
+                unmatched.append(canonical_name)
+    workspace_path = pathlib.Path(workspace_root).resolve()
+    transitive_affected, transitive_projects = dependencies.resolve_transitive(
+        repo_root,
+        workspace_path,
+        project_values,
+        unmatched,
+        stream,
+    )
     selected_data = selection.create(
         repo_root=repo_root,
         requested=value.get("images", []),
@@ -66,6 +92,9 @@ def create(repo_root: pathlib.Path, value: dict[str, object]) -> dict[str, objec
         container_project=container_project,
         stream=stream,
         infer=value.get("infer_images", True),
+        direct_affected=direct_affected,
+        transitive_affected=transitive_affected,
+        transitive_projects=transitive_projects,
     )
     selected = selected_data["images"]
     target_expression = selected_data["target_expression"]
@@ -76,6 +105,41 @@ def create(repo_root: pathlib.Path, value: dict[str, object]) -> dict[str, objec
     placements = sources.placement_records(
         repo_root, selected, contexts, stream
     )
+    for item in transitive_projects:
+        for image in item["affected_images"]:
+            if image not in selected:
+                continue
+            destination = (
+                f"{image}/src/overrides/{item['source_name']}"
+            )
+            projects.safe_relative_path(destination, "source destination")
+            placements.append(
+                {
+                    "name": item["source_name"],
+                    "canonical_name": item["canonical_name"],
+                    "url": None,
+                    "declared_ref": None,
+                    "maintained_commit": None,
+                    "manifest": None,
+                    "scope": image,
+                    "type": "repository",
+                    "origin": "transitive",
+                    "source_file": ".",
+                    "destination": destination,
+                    "distributions": item["distributions"],
+                }
+            )
+    destinations: dict[str, str] = {}
+    for placement in placements:
+        destination = str(placement["destination"])
+        previous = destinations.get(destination)
+        canonical_name = str(placement["canonical_name"])
+        if previous and previous != canonical_name:
+            raise ValueError(
+                f"source destination collision at {destination}: "
+                f"{previous} and {canonical_name}"
+            )
+        destinations[destination] = canonical_name
 
     project_names = [container_project]
     for placement in placements:
@@ -94,11 +158,20 @@ def create(repo_root: pathlib.Path, value: dict[str, object]) -> dict[str, objec
         planned_sources.append(
             {
                 **placement,
+                "origin": placement.get("origin", "manifest"),
                 "src_dir": project["src_dir"],
                 "inventory_commit": project["inventory_commit"],
                 "authority": project["authority"],
             }
         )
+    source_packages, generated_files = packages.create(
+        repo_root,
+        workspace_path,
+        selected,
+        planned_sources,
+        projects_by_name,
+        stream,
+    )
 
     return {
         "version": PLAN_VERSION,
@@ -112,6 +185,8 @@ def create(repo_root: pathlib.Path, value: dict[str, object]) -> dict[str, objec
         "projects": planned_projects,
         "image_metadata": metadata,
         "sources": planned_sources,
+        "source_packages": source_packages,
+        "generated_files": generated_files,
     }
 
 

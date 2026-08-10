@@ -126,10 +126,10 @@
         s2i_ci_plan: >-
           {{ s2i_ci_plan_data.content | b64decode | from_json }}
 
-    - name: Require the direct-selection provider contract in the plan
+    - name: Require the transitive-selection provider contract in the plan
       ansible.builtin.assert:
         that:
-          - s2i_ci_plan.version == 2
+          - s2i_ci_plan.version == 3
           - s2i_ci_plan.stream == s2i_ci_stream
           - s2i_ci_plan.images | length > 0
           - s2i_ci_plan.images[0] == 'base'
@@ -141,8 +141,15 @@
           - s2i_ci_plan.selection.changed_projects is sequence
           - s2i_ci_plan.selection.inferred_images is sequence
           - s2i_ci_plan.selection.affected_images_by_project is mapping
+          - s2i_ci_plan.selection.direct_affected_images_by_project is mapping
+          - s2i_ci_plan.selection.transitive_affected_images_by_project is mapping
+          - s2i_ci_plan.selection.transitive_projects is sequence
           - s2i_ci_plan.projects | length > 1
           - s2i_ci_plan.sources | length > 0
+          - s2i_ci_plan.source_packages is sequence
+          - s2i_ci_plan.generated_files is sequence
+          - s2i_ci_plan.generated_files | length ==
+              (s2i_ci_plan.images | length - 1) * 2
 
     - name: Initialize planned provider metadata
       ansible.builtin.set_fact:
@@ -151,6 +158,7 @@
         s2i_ci_effective_image_mappings: {}
         s2i_ci_mapping_sources: {}
         s2i_ci_source_placements: []
+        s2i_ci_generated_files: []
 
     - name: Expand planned deployment metadata
       ansible.builtin.include_tasks: planned-metadata-item.yaml
@@ -204,6 +212,13 @@
           {{ s2i_ci_planned_source.canonical_name }} ->
           {{ s2i_ci_planned_source.destination }}
 
+    - name: Materialize planned package and constraint inputs
+      ansible.builtin.include_tasks: generated-file-item.yaml
+      loop: "{{ s2i_ci_plan.generated_files }}"
+      loop_control:
+        loop_var: s2i_ci_planned_file
+        label: "{{ s2i_ci_planned_file.destination }}"
+
     - name: Write observed source-placement manifest
       ansible.builtin.copy:
         dest: "{{ s2i_ci_log_dir }}/source-placements.json"
@@ -212,7 +227,9 @@
           {{ {
                'workspace_root': s2i_ci_workspace_root_realpath.stdout,
                'authority': 'zuul-prepared-workspace-head',
-               'sources': s2i_ci_source_placements
+               'sources': s2i_ci_source_placements,
+               'source_packages': s2i_ci_plan.source_packages,
+               'generated_files': s2i_ci_generated_files
              } | to_nice_json }}
 
     - name: Check previous complete context tree
@@ -275,5 +292,7 @@
                'contexts': s2i_ci_plan.contexts,
                'images': s2i_ci_plan.images,
                'target_expression': s2i_ci_plan.target_expression,
-               'sources': s2i_ci_source_placements
+               'sources': s2i_ci_source_placements,
+               'source_packages': s2i_ci_plan.source_packages,
+               'generated_files': s2i_ci_generated_files
              } | to_nice_json }}

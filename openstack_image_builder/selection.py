@@ -112,8 +112,11 @@ def create(
     container_project: str,
     stream: str,
     infer: object,
+    direct_affected: dict[str, list[str]] | None = None,
+    transitive_affected: dict[str, list[str]] | None = None,
+    transitive_projects: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
-    """Create deterministic direct-selection diagnostics and final images."""
+    """Create deterministic direct/transitive diagnostics and final images."""
     if not isinstance(infer, bool):
         raise ValueError("infer_images must be a boolean")
     containers_dir = repo_root / "containers"
@@ -121,21 +124,38 @@ def create(
     explicit = explicit_images(containers_dir, requested)
     changed = changed_projects(items, primary_project, container_project)
     affected: dict[str, list[str]] = {}
+    direct_matches: dict[str, list[str]] = {}
+    transitive_matches: dict[str, list[str]] = {}
     inferred: list[str] = []
 
     if infer and changed:
         inferred_set: set[str] = set()
+        match_kinds: list[str] = []
         for project in changed:
-            matched = directly_affected_images(repo_root, project, stream)
-            if not matched:
-                raise ValueError(
-                    "changed project is not referenced by a repository "
-                    f"record in sources.txt: {project}"
-                )
+            matched = (
+                direct_affected.get(project, [])
+                if direct_affected is not None
+                else directly_affected_images(repo_root, project, stream)
+            )
+            if matched:
+                direct_matches[project] = matched
+                kind = "direct"
+            else:
+                matched = (transitive_affected or {}).get(project, [])
+                if not matched:
+                    raise ValueError(
+                        "changed project is not referenced by a repository "
+                        f"record in sources.txt: {project}"
+                    )
+                transitive_matches[project] = matched
+                kind = "transitive"
             affected[project] = matched
             inferred_set.update(matched)
+            if kind not in match_kinds:
+                match_kinds.append(kind)
         inferred = [image for image in available if image in inferred_set]
-        reason = "explicit+direct" if explicit else "direct"
+        reason_parts = [*(['explicit'] if explicit else []), *match_kinds]
+        reason = "+".join(reason_parts)
     elif explicit:
         reason = "explicit"
     elif infer:
@@ -161,6 +181,9 @@ def create(
         "changed_projects": changed,
         "inferred_images": inferred,
         "affected_images_by_project": affected,
+        "direct_affected_images_by_project": direct_matches,
+        "transitive_affected_images_by_project": transitive_matches,
+        "transitive_projects": transitive_projects or [],
         "images": selected,
         "target_expression": target_expression,
     }

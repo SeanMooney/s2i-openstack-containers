@@ -120,6 +120,53 @@ class SelectionTest(unittest.TestCase):
             result["inferred_images"],
         )
 
+    def test_transitive_matches_extend_explicit_union_without_reordering(self):
+        project = "opendev.org/openstack/os-resource-classes"
+        result = selection.create(
+            repo_root=self.repo_root,
+            requested=["watcher/watcher-base"],
+            items=[self.container_item, {"project": project}],
+            primary_project=None,
+            container_project=self.container_project,
+            stream="master",
+            infer=True,
+            direct_affected={},
+            transitive_affected={
+                project: [
+                    "cyborg/cyborg",
+                    "cyborg/cyborg-agent",
+                    "watcher/watcher-base",
+                ]
+            },
+            transitive_projects=[
+                {
+                    "canonical_name": project,
+                    "distributions": ["os-resource-classes"],
+                }
+            ],
+        )
+
+        self.assertEqual("explicit+transitive", result["reason"])
+        self.assertEqual(
+            [
+                "base",
+                "watcher/watcher-base",
+                "cyborg/cyborg",
+                "cyborg/cyborg-agent",
+            ],
+            result["images"],
+        )
+        self.assertEqual(
+            {
+                project: [
+                    "cyborg/cyborg",
+                    "cyborg/cyborg-agent",
+                    "watcher/watcher-base",
+                ]
+            },
+            result["transitive_affected_images_by_project"],
+        )
+
     def test_duplicate_zuul_items_are_folded_once(self):
         project = {"canonical_name": "opendev.org/openstack/watcher"}
         result = self._create(projects=[project, project])
