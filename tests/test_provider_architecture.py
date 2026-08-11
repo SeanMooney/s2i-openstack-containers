@@ -194,10 +194,34 @@ class ProviderArchitectureTest(unittest.TestCase):
         self.assertIn("../shared/prepare-sources.yaml", zuul_run)
         self.assertNotIn("image-metadata-item.yaml", run)
         self.assertNotIn("validate-mapping-overrides.yaml", run)
-        self.assertIn('S2I_CONTEXTS_ROOT: "{{ s2i_ci_contexts_root }}"', run)
-        self.assertIn('ERROR_ON_CLONE: "1"', run)
+        self.assertIn("Create the immutable native build plan", run)
+        self.assertIn("Build selected images natively", run)
+        self.assertIn("--contexts-root", run)
+        self.assertIn("s2i_ci_native_build_plan", run)
+        self.assertNotIn(
+            'S2I_CONTEXTS_ROOT: "{{ s2i_ci_contexts_root }}"', run
+        )
+        self.assertNotIn('ERROR_ON_CLONE: "1"', run)
         self.assertIn("s2i_ci_selected_images | join(',')", run)
         self.assertIn("s2i_ci_backend_target_expression", run)
+
+    def test_c8_cuts_over_only_prepared_image_building(self):
+        run = self._read("playbooks/container-ci/shared/run.yaml")
+        github = "\n".join(
+            self._read(str(path.relative_to(self.repo_root)))
+            for path in sorted(
+                (self.repo_root / ".github/workflows").glob("*.yml")
+            )
+        )
+
+        self.assertIn("native-build-plan.json", run)
+        self.assertIn("oib-build", run)
+        self.assertIn("Build selected images natively", run)
+        self.assertNotIn("build-parallel", run)
+        self.assertIn("build.sh\"\n          - refs", run)
+        self.assertIn("build.sh\"\n          - push", run)
+        self.assertIn("tox -e build", github)
+        self.assertNotIn("oib-build", github)
 
     def test_return_contract_is_selective_and_secret_free(self):
         returned = self._read(

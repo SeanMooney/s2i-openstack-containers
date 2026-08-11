@@ -54,11 +54,11 @@ tox -e linters
 ## Repository structure
 
 ```text
-build.sh                     build and source-maintenance implementation
+build.sh                     shell build, push, and maintenance implementation
 containers/base/             common openstack-base image
 containers/cyborg/           Cyborg sources and image contexts
 containers/watcher/          Watcher sources and image context
-openstack_image_builder/      OIB planner and local lifecycle adapters
+openstack_image_builder/      OIB planning, prepared builds, and local lifecycle
 playbooks/container-ci/       shared, Zuul, and local Ansible entry points
 tests/                       stdlib unittest suite
 tox.ini                      contributor command environments
@@ -136,6 +136,10 @@ STREAM=master ./build.sh build watcher
 STREAM=master ./build.sh build cyborg/cyborg-agent
 STREAM=master ./build.sh build watcher cyborg/cyborg-agent
 ```
+
+Zuul and the OIB-local lifecycle assemble isolated contexts and use the native
+OIB prepared-build backend. Direct contributor and GitHub builds retain the
+shell interface.
 
 The `custom` tox environment exposes the same interface when a tox-managed
 Python environment is useful:

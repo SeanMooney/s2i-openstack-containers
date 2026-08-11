@@ -46,9 +46,10 @@ glance/glance-api          openstack-glance-api
 watcher/watcher-base       openstack-watcher-base
 ```
 
-`build.sh` is the build and source-maintenance interface. Buildah performs
-image builds and pushes. Podman is useful for inspecting and running the
-resulting images.
+`build.sh` remains the direct contributor build, publication, and
+source-maintenance interface. Prepared Zuul and OIB-local contexts use the
+native OIB build command. Both backends invoke Buildah; Podman is useful for
+inspecting and running the resulting images.
 
 ## Publication authority
 
@@ -78,7 +79,8 @@ README.md                    short project entry point
 
 developer-guide.md           contributor architecture and workflow reference
 TESTING.md                   concise compatibility testing entry point
-build.sh                     build, push, and source-maintenance implementation
+build.sh                     shell build, push, and maintenance implementation
+openstack_image_builder/      planning, native build, and local lifecycle code
 tox.ini                      dependency-managed contributor commands
 pyproject.toml               Python lint and format configuration
 .pre-commit-config.yaml      repository-wide quality checks
@@ -324,8 +326,9 @@ Tests must not leave generated state elsewhere in the repository.
 
 `containers/base/Containerfile` starts from UBI 10 minimal. It installs common
 RPM and Python dependencies, Kolla helper scripts, service user/group support,
-and the common entry point. Service images refer to its resulting tag through
-the `BASE_IMAGE` build argument.
+and the common entry point. `BASE_OS_IMAGE` optionally replaces that parent for
+shell and native parity tests. Service images refer to the resulting base tag
+through the separate `BASE_IMAGE` build argument.
 
 ## Service images
 
@@ -401,6 +404,8 @@ NAMESPACE
 TAG
 IMAGE_PREFIX
 BASE_IMAGE
+BASE_OS_IMAGE
+BUILD_PLATFORM
 CONSTRAINTS_FILE
 BUILD_CONSTRAINTS_FILE
 PARALLEL
@@ -410,6 +415,55 @@ PIP_NO_BINARY
 
 Use `PIP_NO_BINARY=:all:` when specifically testing source distribution builds.
 It increases build time and is not needed for ordinary validation.
+
+## Native prepared-context builds
+
+C8 evaluates a native OIB build backend without removing the shell backend.
+The installed commands are:
+
+```console
+tox -e oib-build -- build-plan --repo-root "$PWD" \\
+  --source-plan .tmp/source-plan.json \\
+  --contexts-root .tmp/build-contexts \\
+  --registry localhost --namespace openstack --tags test \\
+  --output .tmp/native-build-plan.json
+tox -e oib-build -- list --plan .tmp/native-build-plan.json
+tox -e oib-build -- refs --plan .tmp/native-build-plan.json
+tox -e oib-build -- build --plan .tmp/native-build-plan.json \\
+  --logs-dir .tmp/native-build-logs
+```
+
+The runtime `BuildPlan` is separate from the version-3 source/staging plan. It
+freezes selected-image order, prepared context and Containerfile paths, exact
+references, effective constraints and source maps, platform and base overrides,
+parallelism, and the complete Buildah argv for every image. Loading the plan
+revalidates those derived values and requires all paths to remain under the
+repository's isolated `.tmp` context tree.
+
+Native execution always builds `base` first. It then uses bounded asyncio
+concurrency for service images. Buildah stdout and stderr are drained
+continuously, prefixed by image, flushed to the caller, and retained in one log
+per image. Each child has its own process group; failure or cancellation
+terminates and awaits all active groups before returning the failing status.
+Native OIB never clones source. Only the shared run playbook's complete prepared
+contexts are accepted.
+
+The shell and native parity suite renders both backends from one immutable plan
+and context tree and compares target order, references, and complete Buildah
+argv by image. Standalone shell cloning remains a separate compatibility test.
+
+The C8 migration status is intentionally mixed:
+
+| Workflow operation | Backend |
+| --- | --- |
+| Zuul and OIB-local prepared build | Native OIB |
+| Zuul and OIB-local publication and references | `build.sh` |
+| GitHub and direct standalone build | `build.sh` |
+| Source maintenance | `build.sh` |
+| Production build and publication | Konflux |
+
+Native publication and maintenance remain C9/C10 evaluation work. C8 does not
+approve the overall migration.
 
 ## Push commands
 
@@ -443,10 +497,10 @@ inventory defines a `builder` group containing only `localhost` with
 local host through the same `hosts: builder` contract used by Zuul.
 
 `run` imports shared source planning/context assembly and shell-backed
-publication in one Ansible invocation. The shared playbook passes
-`S2I_CONTEXTS_ROOT` and `ERROR_ON_CLONE=1`, so prepared local builds cannot fall
-back to source cloning. `build.sh` remains the build, push, and exact-reference
-backend. The OIB adapter does not implement native image operations.
+publication in one Ansible invocation. The shared playbook creates a native
+runtime `BuildPlan`; OIB builds only from its prepared contexts and therefore
+cannot fall back to source cloning. `build.sh` remains the push and
+exact-reference backend during C8, as well as the standalone build backend.
 
 `cleanup` is idempotent and accepts partially prepared state. It removes exact
 workflow image tags, the explicitly owned `s2i_ci_registry` container,
@@ -465,6 +519,7 @@ by `prepare` is authoritative for later phases. Useful artifacts include:
 .tmp/local/source-manifest.json
 .tmp/local/zuul-output/logs/inventory.yaml
 .tmp/local/zuul-output/logs/container-build/build-plan.json
+.tmp/local/zuul-output/logs/container-build/native-build-plan.json
 .tmp/local/zuul-output/logs/container-build/source-placements.json
 .tmp/local/zuul-output/logs/container-build/build-contexts.json
 .tmp/local/zuul-output/logs/container-build/published-images.json
@@ -522,9 +577,10 @@ static metadata, an unused distribution, or an additional dependency required
 by `base` fails clearly. A job can disable inference, but it must then supply a
 non-empty explicit image list.
 
-`build.sh` receives one comma-separated expression from the resulting immutable
-plan and automatically retains the required base. Existing single-image,
-project, and `all` shell targets keep their standalone behavior.
+The source plan retains one normalized comma-separated target expression and
+the required base. Native `BuildPlan` creation revalidates shell-compatible
+single-image, project, explicit-union, and `all` target semantics. Existing
+shell targets keep their standalone behavior.
 
 ### Planning and speculative source staging
 
@@ -548,17 +604,16 @@ content into isolated `.tmp/build-contexts/<scope>` trees, records separate
 source-placement and context-assembly manifests, and activates a complete
 context tree atomically.
 
-The provider invokes `build.sh` with `S2I_CONTEXTS_ROOT` pointing at those
-contexts and `ERROR_ON_CLONE=1`. Consequently, missing speculative service
+The provider creates a separate immutable native `BuildPlan` after context
+assembly and invokes OIB directly. Consequently, missing speculative service
 source, effective lock, package map, or prepared context content fails instead
 of falling back to network acquisition or committed package inputs. The
 prepared `requirements` HEAD and upper-constraints file remain validated,
 staged, and recorded. Each image's effective lock is instead derived from its
 committed `requirements.lock.<stream>` so unrelated source-only packages from
 the full upper constraints are never sent to `pip wheel`. Direct contributor
-and GitHub shell builds without `S2I_CONTEXTS_ROOT` retain maintained-pin
-cloning, committed locks, and tracked package maps as an independent
-compatibility path.
+and GitHub shell builds without prepared contexts retain maintained-pin cloning,
+committed locks, and tracked package maps as an independent compatibility path.
 
 ### Transitive source packages and planned constraints
 
@@ -819,14 +874,16 @@ tox -e unit -- -k test_name_pattern
 Tests use temporary directories and local bare Git remotes so they do not
 change a contributor's source checkouts or container storage.
 
-Exercise the installed planning command with:
+Exercise the installed planning and native-build commands with:
 
 ```console
 tox -e oib-plan -- --help
+tox -e oib-build -- build --help
 ```
 
-The planner environment installs the project wheel. It exposes planning only;
-source staging and context assembly remain Ansible responsibilities.
+Both environments install the project wheel. The planner command remains
+side-effect-free; source staging and context assembly remain Ansible
+responsibilities. Native build accepts only their completed context tree.
 
 ## Formatting and static analysis
 
@@ -942,6 +999,11 @@ STREAM=master BUILD_LOGS_DIR=.tmp/build-logs \
 Parallel service output is prefixed by image and streamed while each build
 runs. The command preserves the failing exit status, stops outstanding builds,
 and reports the log directory without replaying every successful log.
+
+For a native prepared build, inspect `native-build-plan.json`, `build.log`, and
+the per-image logs in the container-build artifact directory. The plan records
+the complete Buildah argv. Native cancellation terminates each active Buildah
+process group before returning status 130 for SIGINT or 143 for SIGTERM.
 
 ## A local OIB phase fails
 

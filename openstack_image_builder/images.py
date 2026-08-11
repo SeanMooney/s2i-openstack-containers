@@ -57,6 +57,42 @@ def ordered_selection(
     return selected, ",".join(selected)
 
 
+def target_selection(
+    containers_dir: pathlib.Path, target: str
+) -> tuple[list[str], str]:
+    """Normalize shell-compatible all, image, project, or union targets."""
+    if not target or any(character.isspace() for character in target):
+        raise ValueError("target must be non-empty and contain no whitespace")
+    available = discover(containers_dir)
+    services = [image for image in available if image != "base"]
+
+    def one(item: str) -> list[str]:
+        if item == "all":
+            return available
+        if item in available:
+            return [item]
+        project = [
+            image
+            for image in services
+            if image.split("/", 1)[0] == item
+        ]
+        if project:
+            return project
+        raise ValueError(f"unknown image or project: {item}")
+
+    result = ["base"]
+    seen = {"base"}
+    for item in target.split(","):
+        if not item:
+            raise ValueError("target union contains an empty item")
+        for image in one(item):
+            if image not in seen:
+                result.append(image)
+                seen.add(image)
+    expression = ",".join(result)
+    return result, expression
+
+
 def context_scopes(selected: list[str]) -> list[str]:
     """Return maintained context names in first-use order."""
     result: list[str] = []
