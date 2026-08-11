@@ -1,0 +1,27 @@
+---
+- job:
+    name: s2i-openstack-containers-unit
+    parent: tox
+    description: Run the stdlib unit test suite.
+    vars:
+      python_version: "3.12"
+      tox_envlist: unit
+
+- job:
+    name: s2i-openstack-containers-linters
+    parent: tox-linters
+    description: Run repository formatting and style checks.
+    vars:
+      python_version: "3.12"
+
+- job:
+    name: s2i-openstack-containers-update-sources
+    parent: tox
+    description: Verify generated source metadata from committed source pins.
+    post-run: playbooks/testing/update-sources-diff.yaml
+    vars:
+      python_version: "3.12"
+      tox_envlist: update-sources
+      tox_environment:
+        SKIP_HASH_UPDATE: "1"
+        STREAM: master
