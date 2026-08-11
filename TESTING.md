@@ -10,6 +10,7 @@ tox -e unit
 tox -e linters
 tox -e molecule
 tox -e oib-plan -- --help
+tox -e oib-build -- build --help
 tox -e oib-local -- --help
 ```
 
@@ -22,6 +23,14 @@ tox -e unit -- -k SelectionTest
 Selection coverage includes explicit targets, all-images fallback, direct
 Watcher and Cyborg changes, deterministic unions, malformed inputs, and the
 boundary that defers unmatched package dependencies.
+
+Exercise native plan, Buildah argv parity, streaming, bounded concurrency,
+failure propagation, process-group cancellation, and retained logs with:
+
+```console
+tox -e unit -- -k BuildPlanTest
+tox -e unit -- -k NativeBuild
+```
 
 A real local lifecycle builds, publishes, validates, and cleans all images with
 pinned source checkouts:

@@ -71,7 +71,10 @@
 #   NAMESPACE         Registry namespace (default: openstack)
 #   TAG               Image tag(s), comma-separated for multiple (default: latest)
 #   IMAGE_PREFIX      Prefix for image names (default: openstack)
-#   BASE_IMAGE        Base image for the base container (default: registry.access.redhat.com/ubi10/ubi:latest)
+#   BASE_IMAGE        Parent image for service containers (default: the first
+#                     exact tag of the locally built base image)
+#   BASE_OS_IMAGE     Optional parent OS image override for the base container.
+#   BUILD_PLATFORM    Optional OCI build platform, including a CPU variant.
 #   CONSTRAINTS_FILE  Constraints/lockfile base name (default: requirements.lock)
 #   BUILD_CONSTRAINTS_FILE  Build-requirements lockfile base name (default: buildrequirements.lock)
 #   DEFAULT_STREAM    Default stream (default: master). When update-sources runs
@@ -99,8 +102,13 @@ STREAM="${STREAM:-master}"
 REGISTRY="${REGISTRY:-localhost}"
 NAMESPACE="${NAMESPACE:-openstack}"
 TAG="${TAG:-${STREAM}-latest}"
-IMAGE_PREFIX="${IMAGE_PREFIX:-openstack}"
-BASE_IMAGE="${BASE_IMAGE:-${REGISTRY}/${NAMESPACE}/${IMAGE_PREFIX}-base:${TAG%%,*}}"
+IMAGE_PREFIX="${IMAGE_PREFIX-openstack}"
+if [[ -z "${BASE_IMAGE:-}" ]]; then
+  _base_name="${IMAGE_PREFIX:+${IMAGE_PREFIX}-}base"
+  BASE_IMAGE="${REGISTRY}/${NAMESPACE}/${_base_name}:${TAG%%,*}"
+fi
+BASE_OS_IMAGE="${BASE_OS_IMAGE:-}"
+BUILD_PLATFORM="${BUILD_PLATFORM:-}"
 CONSTRAINTS_FILE="${CONSTRAINTS_FILE:-requirements.lock}"
 BUILD_CONSTRAINTS_FILE="${BUILD_CONSTRAINTS_FILE:-buildrequirements.lock}"
 UPSTREAM_CONSTRAINTS="upper-constraints.txt"
@@ -172,17 +180,19 @@ image_tag() {
   echo "${REGISTRY}/${NAMESPACE}/$(image_name "${dir_name}"):${first_tag}"
 }
 
-# Generate --tag arguments for all tags (TAG is comma-separated)
+# Generate array-safe --tag arguments for all tags (TAG is comma-separated).
+declare -a _IMAGE_TAG_ARGS=()
 image_tag_args() {
   local dir_name="$1"
   local name
+  local t
+  local -a tags
   name="$(image_name "${dir_name}")"
-  local args=""
+  _IMAGE_TAG_ARGS=()
   IFS=',' read -ra tags <<< "${TAG}"
   for t in "${tags[@]}"; do
-    args="${args} --tag ${REGISTRY}/${NAMESPACE}/${name}:${t}"
+    _IMAGE_TAG_ARGS+=(--tag "${REGISTRY}/${NAMESPACE}/${name}:${t}")
   done
-  echo "${args}"
 }
 
 # Track temporary source and frozen-ref repositories so they can be cleaned.
@@ -362,11 +372,22 @@ build_image() {
       ensure_project_constraints "${dir_name}" "${STREAM}"
       base_constraints="${UPSTREAM_CONSTRAINTS}.${STREAM}"
     fi
+    local -a platform_args=()
+    local -a base_os_args=()
+    local -a pip_args=()
+    [[ -n "${BUILD_PLATFORM}" ]] && \
+      platform_args+=(--platform "${BUILD_PLATFORM}")
+    [[ -n "${BASE_OS_IMAGE}" ]] && \
+      base_os_args+=(--build-arg "BASE_IMAGE=${BASE_OS_IMAGE}")
+    [[ -n "${PIP_NO_BINARY}" ]] && \
+      pip_args+=(--build-arg "PIP_NO_BINARY=${PIP_NO_BINARY}")
+    image_tag_args "${dir_name}"
     buildah bud \
-      $(image_tag_args "${dir_name}") \
+      "${platform_args[@]}" \
+      "${_IMAGE_TAG_ARGS[@]}" \
+      "${base_os_args[@]}" \
       --build-arg "CONSTRAINTS_FILE=${base_constraints}" \
-      --build-arg "BASE_IMAGE=${BASE_IMAGE}" \
-      ${PIP_NO_BINARY:+--build-arg "PIP_NO_BINARY=${PIP_NO_BINARY}"} \
+      "${pip_args[@]}" \
       -f "${containerfile}" \
       "${context_dir}/"
     return
@@ -416,12 +437,23 @@ build_image() {
     return 1
   fi
 
+  local -a platform_args=()
+  local -a pull_args=()
+  local -a pip_args=()
+  [[ -n "${BUILD_PLATFORM}" ]] && \
+    platform_args+=(--platform "${BUILD_PLATFORM}")
+  [[ "${BASE_IMAGE}" == "$(image_tag base)" ]] && pull_args+=(--pull-never)
+  [[ -n "${PIP_NO_BINARY}" ]] && \
+    pip_args+=(--build-arg "PIP_NO_BINARY=${PIP_NO_BINARY}")
+  image_tag_args "${dir_name}"
   buildah bud \
-    $(image_tag_args "${dir_name}") \
+    "${platform_args[@]}" \
+    "${pull_args[@]}" \
+    "${_IMAGE_TAG_ARGS[@]}" \
     --build-arg "CONSTRAINTS_FILE=${build_constraints}" \
     --build-arg "SOURCE_PACKAGE_MAP=${source_package_map}" \
     --build-arg "BASE_IMAGE=${BASE_IMAGE}" \
-    ${PIP_NO_BINARY:+--build-arg "PIP_NO_BINARY=${PIP_NO_BINARY}"} \
+    "${pip_args[@]}" \
     -f "${containerfile}" \
     "${context_dir}/"
 }
@@ -1467,7 +1499,9 @@ case "${ACTION}" in
     echo "  NAMESPACE         Registry namespace (default: openstack)"
     echo "  TAG               Image tag(s), comma-separated (default: latest)"
     echo "  IMAGE_PREFIX      Prefix for image names (default: openstack)"
-    echo "  BASE_IMAGE        Base image for the base container"
+    echo "  BASE_IMAGE        Parent image for service containers"
+    echo "  BASE_OS_IMAGE     Optional parent OS image override for the base container"
+    echo "  BUILD_PLATFORM    Optional OCI build platform and CPU variant"
     echo "  CONSTRAINTS_FILE  Constraints/lockfile base name (default: requirements.lock)"
     echo "  BUILD_CONSTRAINTS_FILE  Build-requirements lockfile base name (default: buildrequirements.lock)"
     echo "  DEFAULT_STREAM    Default stream for un-streamed symlinks (default: master)"

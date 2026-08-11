@@ -23,6 +23,15 @@
              default(ansible_facts.processor_vcpus | default(1)) }}
         s2i_ci_images: "{{ s2i_ci_images | default([]) }}"
         s2i_ci_image_mappings: "{{ s2i_ci_image_mappings | default({}) }}"
+        s2i_ci_image_prefix: "{{ s2i_ci_image_prefix | default('openstack') }}"
+        s2i_ci_base_image: "{{ s2i_ci_base_image | default('') }}"
+        s2i_ci_base_os_image: "{{ s2i_ci_base_os_image | default('') }}"
+        s2i_ci_build_platform: "{{ s2i_ci_build_platform | default('') }}"
+        s2i_ci_constraints_file: >-
+          {{ s2i_ci_constraints_file | default('requirements.lock') }}
+        s2i_ci_pip_no_binary: "{{ s2i_ci_pip_no_binary | default('') }}"
+        s2i_ci_native_build_plan: >-
+          {{ s2i_ci_log_dir }}/native-build-plan.json
 
     - name: Validate the selected container project
       ansible.builtin.assert:
@@ -126,6 +135,61 @@
           - s2i_ci_registry.auth_file | default('') is string
           - s2i_ci_registry.cert_dir | default('') is string
 
+    - name: Create the immutable native build plan
+      ansible.builtin.command:
+        argv:
+          - "{{ tox_executable | default('tox') }}"
+          - -qq
+          - -e
+          - oib-build
+          - --
+          - build-plan
+          - --repo-root
+          - "{{ s2i_ci_container_repo }}"
+          - --source-plan
+          - "{{ s2i_ci_plan_file }}"
+          - --contexts-root
+          - "{{ s2i_ci_contexts_root }}"
+          - --registry
+          - "{{ s2i_ci_registry.endpoint }}"
+          - --namespace
+          - "{{ s2i_ci_namespace }}"
+          - --tags
+          - "{{ s2i_ci_tag }}"
+          - --image-prefix
+          - "{{ s2i_ci_image_prefix }}"
+          - --base-image
+          - "{{ s2i_ci_base_image }}"
+          - --base-os-image
+          - "{{ s2i_ci_base_os_image }}"
+          - --platform
+          - "{{ s2i_ci_build_platform }}"
+          - --constraints-file
+          - "{{ s2i_ci_constraints_file }}"
+          - --pip-no-binary
+          - "{{ s2i_ci_pip_no_binary }}"
+          - --parallel
+          - "{{ s2i_ci_parallel | string }}"
+          - --output
+          - "{{ s2i_ci_native_build_plan }}"
+        chdir: "{{ s2i_ci_container_repo }}"
+      changed_when: true
+
+    - name: Resolve native planned image references
+      ansible.builtin.command:
+        argv:
+          - "{{ tox_executable | default('tox') }}"
+          - -qq
+          - -e
+          - oib-build
+          - --
+          - refs
+          - --plan
+          - "{{ s2i_ci_native_build_plan }}"
+        chdir: "{{ s2i_ci_container_repo }}"
+      register: s2i_ci_native_refs
+      changed_when: false
+
     - name: Resolve intended exact image references before mutation
       ansible.builtin.command:
         argv:
@@ -138,6 +202,7 @@
         REGISTRY: "{{ s2i_ci_registry.endpoint }}"
         NAMESPACE: "{{ s2i_ci_namespace }}"
         TAG: "{{ s2i_ci_tag }}"
+        IMAGE_PREFIX: "{{ s2i_ci_image_prefix }}"
       register: s2i_ci_intended_refs
       changed_when: false
 
@@ -149,6 +214,8 @@
     - name: Validate intended exact image references
       ansible.builtin.assert:
         that:
+          - s2i_ci_native_refs.stdout_lines | reject('equalto', '') | list ==
+              s2i_ci_intended_images
           - s2i_ci_intended_images | length == s2i_ci_selected_images | length
           - s2i_ci_intended_images | unique | list | length ==
               s2i_ci_intended_images | length
@@ -172,22 +239,20 @@
                'backend_target': s2i_ci_backend_target_expression
              } | to_nice_json }}
 
-    - name: Build selected images from prepared source contexts
+    - name: Build selected images natively from prepared source contexts
       ansible.builtin.command:
         argv:
-          - "{{ s2i_ci_container_repo }}/build.sh"
-          - build-parallel
-          - "{{ s2i_ci_backend_target_expression }}"
+          - "{{ tox_executable | default('tox') }}"
+          - -qq
+          - -e
+          - oib-build
+          - --
+          - build
+          - --plan
+          - "{{ s2i_ci_native_build_plan }}"
+          - --logs-dir
+          - "{{ s2i_ci_log_dir }}"
         chdir: "{{ s2i_ci_container_repo }}"
-      environment:
-        STREAM: "{{ s2i_ci_stream }}"
-        REGISTRY: "{{ s2i_ci_registry.endpoint }}"
-        NAMESPACE: "{{ s2i_ci_namespace }}"
-        TAG: "{{ s2i_ci_tag }}"
-        PARALLEL: "{{ s2i_ci_parallel | string }}"
-        BUILD_LOGS_DIR: "{{ s2i_ci_log_dir }}"
-        S2I_CONTEXTS_ROOT: "{{ s2i_ci_contexts_root }}"
-        ERROR_ON_CLONE: "1"
       register: s2i_ci_build
       changed_when: s2i_ci_build.rc == 0
 
@@ -211,6 +276,7 @@
         REGISTRY: "{{ s2i_ci_registry.endpoint }}"
         NAMESPACE: "{{ s2i_ci_namespace }}"
         TAG: "{{ s2i_ci_tag }}"
+        IMAGE_PREFIX: "{{ s2i_ci_image_prefix }}"
         REGISTRY_AUTH_FILE: "{{ s2i_ci_registry.auth_file | default('') }}"
         REGISTRY_CERT_DIR: "{{ s2i_ci_registry.cert_dir | default('') }}"
       register: s2i_ci_push
@@ -236,6 +302,7 @@
         REGISTRY: "{{ s2i_ci_registry.endpoint }}"
         NAMESPACE: "{{ s2i_ci_namespace }}"
         TAG: "{{ s2i_ci_tag }}"
+        IMAGE_PREFIX: "{{ s2i_ci_image_prefix }}"
       register: s2i_ci_refs
       changed_when: false
 

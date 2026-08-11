@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "openstack-image-builder"
 version = "0.1.0"
-description = "Plan OpenStack image build inputs"
+description = "Plan and execute OpenStack image builds"
 requires-python = ">=3.11"
 dependencies = ["PyYAML>=6.0.2"]
 

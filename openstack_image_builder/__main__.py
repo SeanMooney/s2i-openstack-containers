@@ -10,7 +10,7 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-"""Run the installed OpenStack image builder planner."""
+"""Run the installed OpenStack image builder command line."""
 
 from openstack_image_builder import cli
 
