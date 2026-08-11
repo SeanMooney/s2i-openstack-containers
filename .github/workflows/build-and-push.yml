@@ -27,7 +27,13 @@ jobs:
         id: built-images
         run: |
           podman images
-          echo "repos=$(podman images --format '${{ '{{.Repository}}' }}' | grep "^${REGISTRY}/${NAMESPACE}/${IMAGE_PREFIX}-" | sort -u | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
+          repositories="$(
+            podman images --format '${{ '{{.Repository}}' }}' |
+              grep "^${REGISTRY}/${NAMESPACE}/${IMAGE_PREFIX}-" |
+              sort -u |
+              tr '\n' ' '
+          )"
+          echo "repos=${repositories}" >> "$GITHUB_OUTPUT"
 
       - name: Log in to Quay
         uses: redhat-actions/podman-login@50c2d9a331bb67c8fdab99b86455fad05e2e3252 # v2

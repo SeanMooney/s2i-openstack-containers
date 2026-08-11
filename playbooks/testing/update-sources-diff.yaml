@@ -1,0 +1,40 @@
+---
+- name: Verify pinned source generation leaves tracked files unchanged
+  hosts: all
+  gather_facts: false
+
+  vars:
+    source_refs_manifest: "{{ zuul.project.src_dir }}/.tmp/source-maintenance/frozen-source-refs.master.tsv"
+    source_refs_log_dir: "{{ ansible_user_dir }}/zuul-output/logs/source-maintenance"
+
+  tasks:
+    - name: Inspect the frozen source-reference manifest
+      ansible.builtin.stat:
+        path: "{{ source_refs_manifest }}"
+      register: source_refs_manifest_stat
+
+    - name: Create the source-maintenance log directory
+      ansible.builtin.file:
+        path: "{{ source_refs_log_dir }}"
+        state: directory
+        mode: "0755"
+      when: source_refs_manifest_stat.stat.exists
+
+    - name: Preserve the frozen source-reference manifest
+      ansible.builtin.copy:
+        src: "{{ source_refs_manifest }}"
+        dest: "{{ source_refs_log_dir }}/frozen-source-refs.master.tsv"
+        remote_src: true
+        mode: preserve
+      when: source_refs_manifest_stat.stat.exists
+
+    - name: Check the tracked repository diff
+      ansible.builtin.command:
+        argv:
+          - git
+          - diff
+          - --exit-code
+          - HEAD
+          - --
+        chdir: "{{ zuul.project.src_dir }}"
+      changed_when: false

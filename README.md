@@ -1,363 +1,156 @@
 # S2I OpenStack Containers
 
-Source-to-image container builds for OpenStack services on UBI 10 (ubi-minimal).
+Source-to-image container builds for OpenStack services on UBI 10
+(`ubi-minimal`). Service code is built from pinned upstream Git sources with
+Python dependencies constrained by generated lock files. Runtime RPM
+requirements are installed with `microdnf`.
 
-Services are built from pinned upstream source using multi-stage Containerfiles.
-All Python dependencies are installed via pip from wheels compiled in a build
-stage, constrained by a `pip-compile`-generated lockfile. System (RPM)
-dependencies are installed via `microdnf`.
+The repository currently builds:
 
-## Repository structure
+- `openstack-base`;
+- `openstack-cyborg`;
+- `openstack-cyborg-agent`;
+- `openstack-watcher-base`.
 
-```
-build.sh                          # Build orchestrator
-containers/
-  base/                           # Base image (openstack-base)
-    Containerfile
-    bindeps.txt                   # System packages for base image
-    pythondeps.txt                # Python packages for base image
-    rpms.repo                     # DNF repo config for RPM lockfile
-    sources.txt                   # Pinned upstream sources (upper-constraints)
-    scripts/                      # Kolla helper scripts (uid_gid_manage, kolla_start, ...)
-  <project>/                      # e.g., watcher
-    sources.txt                   # Pinned sources for this project (service repo + upper-constraints)
-    src/                          # Cloned sources (auto-managed, .gitkeep only in git)
-    rpms.in.yaml                  # [generated] RPM packages for rpm-lockfile-prototype
-    requirements.lock.<stream>    # [generated] pip-compile lockfile
-    buildrequirements.lock.<stream> # [generated] pybuild-deps build lockfile
-    upper-constraints.txt.<stream># [generated] upstream constraints snapshot
-    <image>/                      # e.g., watcher, watcher-api
-      Containerfile
-      bindeps.txt                 # Runtime system packages
-      builddeps.txt               # Build-stage system packages
-      pythondeps.txt              # Extra Python packages (oslo.db[mysql], etc.)
-      pythonbuilddeps.txt         # Build-stage Python packages (pbr, etc.)
-      src/                        # Image-specific sources (if any)
-```
+See [`developer-guide.md`](developer-guide.md) for the complete contributor
+reference, including source ownership, generated files, build architecture,
+testing, maintenance, and troubleshooting.
 
-## Source management
+## Quick start
 
-Source code for each service is cloned into `src/` directories and made
-available to the Containerfile build context. `build.sh` supports two
-levels of `sources.txt` and `src/` directories:
+Install the host container tools:
 
-- **Project level** (`containers/<project>/sources.txt` and
-  `containers/<project>/src/`) -- Sources shared by all images in the
-  project. This is where the main service repo lives (e.g., `watcher`).
-- **Image level** (`containers/<project>/<image>/sources.txt` and
-  `containers/<project>/<image>/src/`) -- Sources specific to a single
-  image. Use this when one image needs an extra dependency that other
-  images in the same project don't need.
-
-During a build, the Containerfile merges both levels into `/src/` inside
-the container:
-
-```dockerfile
-COPY src/ /src/           # project-level sources
-COPY <image>/src/ /src/   # image-level sources (merged on top)
-```
-
-The build context is set to `containers/<project>/`, so both directories
-are reachable.
-
-### Automatic cloning and cleanup
-
-When running `build` or `update-sources`, `build.sh` reads `sources.txt`
-at both levels and clones any repo that doesn't already exist in `src/`.
-These auto-cloned repos are tracked and **removed automatically on exit**
-(via an EXIT trap), so `src/` directories stay clean in the repo (only a
-`.gitkeep` is committed).
-
-If a checkout already exists in `src/` (e.g., a local development clone),
-`build.sh` uses it as-is and does **not** remove it on exit. This lets you
-work on a local branch without `build.sh` overwriting it.
-
-### Source overrides
-
-To patch or replace a transitive dependency, place the modified source in
-`containers/<project>/src/overrides/<pkg>/`. The build stage picks up
-everything under `src/overrides/` automatically -- no `sources.txt` entry
-is needed. The filtered constraints file excludes source-built packages so
-the overridden version takes precedence over PyPI.
-
-## Manually maintained files
-
-These files are created and updated by hand. `build.sh` reads them but
-never overwrites them.
-
-| File | Location | Purpose |
-|------|----------|---------|
-| `Containerfile` | `containers/base/`, `containers/<project>/<image>/` | Multi-stage build definition |
-| `sources.txt` | `containers/base/`, `containers/<project>/` | Pinned source repos and branches per stream |
-| `bindeps.txt` | base and each image | Runtime RPM packages (installed via `microdnf`) |
-| `builddeps.txt` | each image | Build-stage RPM packages (compilers, `-devel` headers) |
-| `pythondeps.txt` | base and each image | Extra pip packages beyond the service's `requirements.txt` |
-| `pythonbuilddeps.txt` | each image | Build-stage pip packages (e.g., `pbr`) |
-| `rpms.repo` | `containers/base/` | DNF repo configuration for RPM lockfile |
-| `scripts/*` | `containers/base/scripts/` | Kolla helper scripts (`kolla_start`, `uid_gid_manage`, etc.) |
-| `config/*` | `containers/service/` | Config files manually maintained out of upstream repo |
-
-## Streams
-
-A **stream** is a coherent set of source repos at specific commits. Typical
-streams are `master` (tracking upstream HEAD) and `stable` (tracking a
-stable branch like `stable/2026.1`). Different projects in the same stream
-may follow different branches.
-
-Each stream gets its own set of generated files (lockfile, constraints).
-Multiple streams can coexist in the same repo -- they are distinguished
-by the `.<stream>` suffix on generated files.
-
-### sources.txt format
-
-Each line defines a source repo pinned to a specific commit, grouped by stream:
-
-```
-<stream> <name> <repo-url> <branch-to-follow> <pinned-hash>
-```
-
-Example:
-
-```
-master upper-constraints https://opendev.org/openstack/requirements.git master 4bb8ff9ad664e832d78139e23f5933cca6054d35
-master watcher https://opendev.org/openstack/watcher.git master 4abcf29a3ec323a6df3f567d7485b320354af4f4
-stable upper-constraints https://opendev.org/openstack/requirements.git stable/2026.1 c4c55d5279d824dc261a43ac51b56146ccc4dd4f
-stable watcher https://opendev.org/openstack/watcher.git stable/2026.1 ba7b161dc24a6f2f1f7b7a2a529b8d93c65fee6c
-```
-
-The special name `upper-constraints` tells `build.sh` to fetch
-`upper-constraints.txt` from the repo instead of cloning the full repo
-into `src/`. The upper-constraints.txt file will be used as constraints
-file via a lock file automatically created using pip-compile.
-
-### Dependency files
-
-Each image directory has four dependency files, all plain text with one
-entry per line (blank lines and `#` comments are ignored):
-
-- **`builddeps.txt`** -- System packages needed during the build stage only
-  (compilers, header files). Not present in the final image.
-- **`pythonbuilddeps.txt`** -- Python packages needed during the build stage.
-- **`bindeps.txt`** -- System packages installed in the final runtime image.
-- **`pythondeps.txt`** -- Extra Python packages installed via pip in the
-  final image (database drivers, caching backends, CLI clients).
-
-The base image (`containers/base/`) also has `bindeps.txt` and `pythondeps.txt`
-for packages shared across all service images.
-
-## Auto-generated files
-
-These files are created and updated by `build.sh update-sources`. They
-should be committed to the repository but never edited by hand.
-
-| File | Location | Generated from |
-|------|----------|----------------|
-| `upper-constraints.txt.<stream>` | `containers/<project>/`, `containers/base/` | Fetched from the `upper-constraints` entry in `sources.txt` |
-| `requirements.lock.<stream>` | `containers/<project>/`, `containers/base/` | `pip-compile` against all `requirements.txt` + `pythondeps.txt` + `pythonbuilddeps.txt`, constrained by `upper-constraints.txt.<stream>` |
-| `buildrequirements.lock.<stream>` | `containers/<project>/`, `containers/base/` | `pybuild-deps compile` against `requirements.lock.<stream>` |
-| `rpms.in.yaml` | `containers/<project>/`, `containers/base/` | Union of all `bindeps.txt` + `builddeps.txt` across images in the project |
-
-When the stream being updated matches `DEFAULT_STREAM` (default: `master`),
-un-suffixed symlinks are also created:
-
-```
-requirements.lock -> requirements.lock.master
-buildrequirements.lock -> buildrequirements.lock.master
-upper-constraints.txt -> upper-constraints.txt.master
-```
-
-These symlinks allow Containerfiles to use `ARG CONSTRAINTS_FILE=requirements.lock`
-without needing to know which stream is active.
-
-**Important:** Whenever you modify `sources.txt`, `pythondeps.txt`,
-`pythonbuilddeps.txt`, `bindeps.txt`, or `builddeps.txt`, you must re-run
-`build.sh update-sources` (or `tox -e update-sources`) to regenerate the
-lockfile, constraints, and `rpms.in.yaml`. Failing to do so will cause
-builds to use stale dependency pins.
-
-## Prerequisites
-
-### System packages
-
-- `git` -- cloning source repos
-- `buildah` -- building container images
-- `podman` -- running and inspecting built images
-
-Install all at once:
-
-```bash
+```console
 ./build.sh install-deps
 ```
 
-This runs `sudo dnf install` (or the appropriate package manager) for the
-system packages and `pip install pip-tools` for the Python dependencies.
+List the available image targets:
 
-### Python packages
-
-- `pip-tools` -- provides `pip-compile`, used by `update-sources` to
-  generate lockfiles
-- `pybuild-deps` -- used by `update-sources` to generate build-requirements
-  lockfiles
-
-If using tox (recommended), Python dependencies are installed automatically
-in the tox virtualenv.
-
-## Workflow
-
-### Using tox
-
-Tox manages a virtualenv with the required Python dependencies and passes
-through all relevant environment variables (`STREAM`, `REGISTRY`, `TAG`, etc.):
-
-```bash
-# Update sources for all projects
-STREAM=master tox -eupdate-sources
-
-# Build all images
-STREAM=master tox -ebuild
-
-# Run any build.sh command via the generic 'custom' target
-STREAM=master tox -ecustom -- update-sources watcher
-STREAM=stable tox -ecustom -- build watcher/watcher-api
-tox -ecustom -- list
-```
-
-### Initial setup
-
-1. Create `containers/<project>/sources.txt` with entries for each stream.
-2. Create image directories under `containers/<project>/<image>/` with
-   a `Containerfile` and the four dependency files.
-3. Run `update-sources` to generate lockfiles and constraints.
-
-### Updating sources (pinning to latest upstream)
-
-```bash
-STREAM=master ./build.sh update-sources <project-or-all>
-```
-
-This will:
-1. Clone each source repo at the branch tip to resolve the latest commit hash.
-2. Update `sources.txt` with the new pinned hashes.
-3. Fetch `upper-constraints.txt` from the requirements repo.
-4. Generate `rpms.in.yaml` from all `bindeps.txt` + `builddeps.txt` files.
-5. Run `pip-compile` to generate `requirements.lock.<stream>`.
-6. Run `pybuild-deps compile` to generate `buildrequirements.lock.<stream>`.
-7. Create default-stream symlinks if `STREAM == DEFAULT_STREAM`.
-
-Auto-cloned repos in `src/` are cleaned up automatically on exit.
-Pre-existing checkouts in `src/` are used as-is and not removed.
-
-To regenerate lockfiles without updating pinned hashes (steps 1--3 are
-skipped; repos are cloned at the existing pinned hashes instead):
-
-```bash
-STREAM=master SKIP_HASH_UPDATE=1 ./build.sh update-sources <project-or-all>
-```
-
-### Building images
-
-```bash
-# Build all images for a stream
-STREAM=master ./build.sh build all
-
-# Build a single project (all its images)
-STREAM=master ./build.sh build watcher
-
-# Build a specific image
-STREAM=master ./build.sh build watcher/watcher-api
-```
-
-Build order: the base image is always built first when targeting `all`.
-Service images use the base image via `--build-arg BASE_IMAGE`.
-
-### Pushing images
-
-```bash
-STREAM=master REGISTRY=quay.io NAMESPACE=myorg ./build.sh push all
-```
-
-All image tags are verified to exist locally before any push begins.
-
-### Listing images
-
-```bash
+```console
 ./build.sh list
 ```
 
-## Build architecture
+Build all images from the maintained `master` source pins:
 
-### Base image (`openstack-base`)
+```console
+STREAM=master tox -e build
+```
 
-Single-stage build on `ubi10/ubi-minimal`. Installs system packages, Python,
-pip, kolla helper scripts, and common Python dependencies. All service
-images inherit from this.
+Run the unit suite and repository checks:
 
-### Service images
+```console
+tox -e unit
+tox -e linters
+```
 
-Two-stage build:
+## Repository structure
 
-1. **Build stage** (FROM base AS build):
-   - Installs build-time system and Python dependencies.
-   - Copies source repos from the build context (`src/`).
-   - Builds wheels from source with `pip wheel --no-deps`.
-   - Generates a filtered constraints file (excludes source-built packages).
-   - Records a build manifest (`source-built-packages.txt`) with
-     package name, commit hash, and version.
-   - Runs oslo-config-generator for config files (service-specific).
+```text
+build.sh                     build and source-maintenance implementation
+containers/base/             common openstack-base image
+containers/cyborg/           Cyborg sources and image contexts
+containers/watcher/          Watcher sources and image context
+tests/                       stdlib unittest suite
+tox.ini                      contributor command environments
+developer-guide.md           architecture and workflow reference
+```
 
-2. **Runtime stage** (FROM base):
-   - Creates the service user via `uid_gid_manage`.
-   - Installs runtime system packages from `bindeps.txt`.
-   - Installs wheels from the build stage plus extra Python deps from
-     `pythondeps.txt`, constrained by the filtered constraints file.
-   - Sets up directories, config files, and permissions.
+A service project normally contains shared source and generated dependency
+data plus one or more image directories:
 
-## Environment variables
+```text
+containers/<project>/
+  sources.txt
+  requirements.lock.<stream>
+  buildrequirements.lock.<stream>
+  upper-constraints.txt.<stream>
+  rpms.in.yaml
+  src/
+  <image>/
+    Containerfile
+    bindeps.txt
+    builddeps.txt
+    pythondeps.txt
+    pythonbuilddeps.txt
+```
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `STREAM` | `master` | Stream name (selects which `sources.txt` entries to use) |
-| `REGISTRY` | `localhost` | Container registry |
-| `NAMESPACE` | `openstack` | Registry namespace |
-| `TAG` | `${STREAM}-latest` | Image tag(s), comma-separated for multiple |
-| `IMAGE_PREFIX` | `openstack` | Prefix for image names (e.g., `openstack-watcher`) |
-| `BASE_IMAGE` | `${REGISTRY}/${NAMESPACE}/${IMAGE_PREFIX}-base:${TAG}` | Base image for service builds |
-| `CONSTRAINTS_FILE` | `requirements.lock` | Lockfile base name used during builds |
-| `BUILD_CONSTRAINTS_FILE` | `buildrequirements.lock` | Build-requirements lockfile base name |
-| `DEFAULT_STREAM` | `master` | Stream for which un-suffixed symlinks are created |
-| `PARALLEL` | `nproc` | Max concurrent builds for `build-parallel` |
-| `BUILD_LOGS_DIR` | *(tmpdir, deleted)* | Directory to persist `build-parallel` logs |
-| `SKIP_HASH_UPDATE` | *(unset)* | If set, `update-sources` skips updating pinned hashes and clones repos at existing pins; lockfiles are still regenerated |
-| `PIP_NO_BINARY` | *(unset)* | If set, passed as `--build-arg` to the container build so pip builds packages from source (e.g., `:all:`) |
+## Source and generated files
 
-## Adding a new service
+A `sources.txt` record identifies a stream, project name, repository, branch to
+follow during maintenance, and exact commit used by builds:
 
-1. Create the project directory structure:
+```text
+<stream> <name> <repository-url> <branch-to-follow> <pinned-commit>
+```
 
-   ```
-   containers/<project>/
-     sources.txt
-     src/.gitkeep
-     <image>/
-       Containerfile
-       bindeps.txt
-       builddeps.txt
-       pythondeps.txt
-       pythonbuilddeps.txt
-       src/.gitkeep
-   ```
+`build.sh` clones missing sources into the applicable `src/` directory and
+removes checkouts it created when the command exits. A checkout that already
+exists is used as-is and is not removed, allowing intentional local source
+experiments.
 
-2. Populate `sources.txt` with `upper-constraints` and service repo entries
-   for each stream.
+Containerfiles, `sources.txt`, dependency lists, base scripts, and maintained
+configuration are edited by contributors. These tracked files are generated by
+`build.sh update-sources` and must not be edited by hand:
 
-3. Write the `Containerfile` following the multi-stage pattern (see
-   `containers/watcher/watcher/Containerfile` as an example).
+- `upper-constraints.txt.<stream>`;
+- `requirements.lock.<stream>`;
+- `buildrequirements.lock.<stream>`;
+- `rpms.in.yaml`;
+- default-stream symlinks to the corresponding generated files.
 
-4. Fill in the dependency files for the image.
+After changing a source or dependency input, regenerate the derived files:
 
-5. Run update-sources and build:
+```console
+STREAM=master tox -e update-sources
+```
 
-   ```bash
-   STREAM=master ./build.sh update-sources <project>
-   STREAM=master ./build.sh build <project>
-   ```
+To regenerate from the existing commits without advancing source pins:
+
+```console
+STREAM=master tox -e update-lockfiles
+```
+
+Pass multiple projects or images after `--` to update one deterministic
+selection:
+
+```console
+STREAM=master tox -e update-sources -- watcher cyborg
+```
+
+## Build commands
+
+Build a project or one image with the shell interface:
+
+```console
+STREAM=master ./build.sh build watcher
+STREAM=master ./build.sh build cyborg/cyborg-agent
+STREAM=master ./build.sh build watcher cyborg/cyborg-agent
+```
+
+The `custom` tox environment exposes the same interface when a tox-managed
+Python environment is useful:
+
+```console
+STREAM=master tox -e custom -- build watcher
+STREAM=master tox -e custom -- update-sources watcher
+```
+
+Push verifies that every requested local tag exists before publication:
+
+```console
+STREAM=master REGISTRY=quay.io NAMESPACE=myorg ./build.sh push all
+```
+
+See the developer guide before changing source records, generated files,
+Containerfiles, or image dependencies.
+
+## Publication
+
+Konflux is authoritative for hermetic production provenance and publication.
+The GitHub workflows provide development build and validation coverage. On
+pushes to `main`, `build-and-push` also publishes development tags to Quay;
+those tags do not replace Konflux production artifacts.
+
+## License
+
+See [`LICENSE.txt`](LICENSE.txt).

@@ -1,3 +1,5 @@
+# WebOb compatibility across supported tooling Python versions
+legacy-cgi
 # Database driver (mysql extra for oslo.db)
 oslo.db[mysql]
 # Caching backend (dogpile extra for oslo.cache)

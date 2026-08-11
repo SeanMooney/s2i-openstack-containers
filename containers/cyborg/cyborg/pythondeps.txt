@@ -1,4 +1,6 @@
 # Additional Python packages not in cyborg's requirements.txt
+# WebOb compatibility across supported tooling Python versions
+legacy-cgi
 # Database driver (mysql extra for oslo.db)
 oslo.db[mysql]
 # Caching backend (dogpile extra for oslo.cache)
