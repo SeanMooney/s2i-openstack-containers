@@ -1,0 +1,208 @@
+---
+- name: Remove exact images recorded by the workflow
+  hosts: builder
+  gather_facts: false
+  vars:
+    s2i_ci_output_dir: "{{ ansible_user_dir }}/zuul-output"
+    s2i_ci_log_dir: "{{ s2i_ci_output_dir }}/logs/container-build"
+    s2i_ci_cleanup_images: true
+
+  tasks:
+    - name: Check intended image cleanup metadata
+      when: s2i_ci_cleanup_images | bool
+      ansible.builtin.stat:
+        path: "{{ s2i_ci_log_dir }}/intended-images.json"
+      register: s2i_ci_intended_images_metadata
+
+    - name: Load intended image cleanup metadata
+      when:
+        - s2i_ci_cleanup_images | bool
+        - s2i_ci_intended_images_metadata.stat.exists
+      ansible.builtin.slurp:
+        src: "{{ s2i_ci_log_dir }}/intended-images.json"
+      register: s2i_ci_intended_images_data
+
+    - name: Decode intended image cleanup metadata
+      when:
+        - s2i_ci_cleanup_images | bool
+        - s2i_ci_intended_images_metadata.stat.exists
+      ansible.builtin.set_fact:
+        s2i_ci_cleanup_metadata: >-
+          {{ s2i_ci_intended_images_data.content | b64decode | from_json }}
+
+    - name: Validate intended image cleanup metadata
+      when:
+        - s2i_ci_cleanup_images | bool
+        - s2i_ci_intended_images_metadata.stat.exists
+      ansible.builtin.assert:
+        that:
+          - s2i_ci_cleanup_metadata is mapping
+          - s2i_ci_cleanup_metadata.registry is string
+          - s2i_ci_cleanup_metadata.registry is match('^[A-Za-z0-9.:-]+$')
+          - s2i_ci_cleanup_metadata.namespace is string
+          - s2i_ci_cleanup_metadata.namespace is match('^[A-Za-z0-9_.-]+$')
+          - s2i_ci_cleanup_metadata.images is sequence
+          - s2i_ci_cleanup_metadata.images is not string
+          - s2i_ci_cleanup_metadata.images | unique | list | length ==
+              s2i_ci_cleanup_metadata.images | length
+          - s2i_ci_cleanup_metadata.images |
+              select('match', '^' + s2i_ci_cleanup_metadata.registry |
+                     regex_escape + '/' + s2i_ci_cleanup_metadata.namespace |
+                     regex_escape + '/[A-Za-z0-9_.-]+:[A-Za-z0-9_.-]+$') |
+              list | length == s2i_ci_cleanup_metadata.images | length
+        fail_msg: Refusing unsafe or malformed intended image cleanup metadata
+
+    - name: Record exact intended images for cleanup
+      ansible.builtin.set_fact:
+        s2i_ci_cleanup_images_exact: >-
+          {{ s2i_ci_cleanup_metadata.images | reverse | list }}
+      when:
+        - s2i_ci_cleanup_images | bool
+        - s2i_ci_intended_images_metadata.stat.exists
+
+    - name: Default exact intended image list
+      ansible.builtin.set_fact:
+        s2i_ci_cleanup_images_exact: []
+      when:
+        - not s2i_ci_cleanup_images | bool or
+          not s2i_ci_intended_images_metadata.stat.exists
+
+    - name: Check Podman pullback tags
+      ansible.builtin.command:
+        argv:
+          - podman
+          - image
+          - exists
+          - "{{ item }}"
+      loop: "{{ s2i_ci_cleanup_images_exact }}"
+      register: s2i_ci_podman_image_checks
+      changed_when: false
+      failed_when: s2i_ci_podman_image_checks.rc not in [0, 1]
+
+    - name: Remove exact Podman pullback tags
+      ansible.builtin.command:
+        argv:
+          - podman
+          - image
+          - rm
+          - --force
+          - "{{ item.item }}"
+      loop: "{{ s2i_ci_podman_image_checks.results }}"
+      when: item.rc == 0
+      changed_when: true
+
+    - name: Check Buildah-created image tags
+      ansible.builtin.command:
+        argv:
+          - buildah
+          - inspect
+          - --type
+          - image
+          - "{{ item }}"
+      loop: "{{ s2i_ci_cleanup_images_exact }}"
+      register: s2i_ci_buildah_image_checks
+      changed_when: false
+      failed_when: s2i_ci_buildah_image_checks.rc not in [0, 125]
+
+    - name: Remove exact Buildah-created image tags
+      ansible.builtin.command:
+        argv:
+          - buildah
+          - rmi
+          - "{{ item.item }}"
+      loop: "{{ s2i_ci_buildah_image_checks.results }}"
+      when: item.rc == 0
+      changed_when: true
+
+    - name: List remaining Podman image references
+      ansible.builtin.command:
+        argv:
+          - podman
+          - images
+          - --format
+          - "{{ '{{.Repository}}:{{.Tag}}' }}"
+      register: s2i_ci_remaining_podman_images
+      changed_when: false
+
+    - name: List remaining Buildah image references
+      ansible.builtin.command:
+        argv:
+          - buildah
+          - images
+          - --format
+          - "{{ '{{.Name}}:{{.Tag}}' }}"
+      register: s2i_ci_remaining_buildah_images
+      changed_when: false
+
+    - name: Require exact workflow references to be absent
+      ansible.builtin.assert:
+        that:
+          - item not in s2i_ci_remaining_podman_images.stdout_lines
+          - item not in s2i_ci_remaining_buildah_images.stdout_lines
+        fail_msg: "Image cleanup left exact workflow reference {{ item }}"
+      loop: "{{ s2i_ci_cleanup_images_exact }}"
+
+    - name: Check registry validation metadata
+      ansible.builtin.stat:
+        path: "{{ s2i_ci_log_dir }}/registry-state.json"
+      register: s2i_ci_registry_state_metadata
+
+    - name: Load registry validation metadata
+      when: s2i_ci_registry_state_metadata.stat.exists
+      ansible.builtin.slurp:
+        src: "{{ s2i_ci_log_dir }}/registry-state.json"
+      register: s2i_ci_registry_state_data
+
+    - name: Decode registry validation metadata
+      when: s2i_ci_registry_state_metadata.stat.exists
+      ansible.builtin.set_fact:
+        s2i_ci_registry_state: >-
+          {{ s2i_ci_registry_state_data.content | b64decode | from_json }}
+
+    - name: Validate registry validation metadata
+      when: s2i_ci_registry_state_metadata.stat.exists
+      ansible.builtin.assert:
+        that:
+          - s2i_ci_registry_state is mapping
+          - s2i_ci_registry_state.endpoint is string
+          - s2i_ci_registry_state.endpoint is match('^[A-Za-z0-9.:-]+$')
+          - s2i_ci_registry_state.validation_image is string
+          - s2i_ci_registry_state.validation_image.startswith(
+              s2i_ci_registry_state.endpoint + '/')
+
+    - name: Check the Podman registry validation tag
+      when: s2i_ci_registry_state_metadata.stat.exists
+      ansible.builtin.command:
+        argv:
+          - podman
+          - image
+          - exists
+          - "{{ s2i_ci_registry_state.validation_image }}"
+      register: s2i_ci_validation_image_check
+      changed_when: false
+      failed_when: s2i_ci_validation_image_check.rc not in [0, 1]
+
+    - name: Remove the exact Podman registry validation tag
+      when:
+        - s2i_ci_registry_state_metadata.stat.exists
+        - s2i_ci_validation_image_check.rc == 0
+      ansible.builtin.command:
+        argv:
+          - podman
+          - image
+          - rm
+          - --force
+          - "{{ s2i_ci_registry_state.validation_image }}"
+      changed_when: true
+
+    - name: Require registry validation tag to be absent
+      when: s2i_ci_registry_state_metadata.stat.exists
+      ansible.builtin.command:
+        argv:
+          - podman
+          - image
+          - exists
+          - "{{ s2i_ci_registry_state.validation_image }}"
+      register: s2i_ci_validation_image_absent
+      changed_when: false
+      failed_when: s2i_ci_validation_image_absent.rc != 1

@@ -1,0 +1,39 @@
+name: Build and push images
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    env:
+      REGISTRY: quay.io
+      NAMESPACE: ${{ secrets.IMAGENAMESPACE }}
+      TAG: "master-latest,master-${{ github.sha }}"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: ./.github/actions/setup-tox
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y buildah podman
+
+      - name: Build images
+        run: tox -e build
+
+      - name: list images
+        run: podman images
+
+      - name: Log in to Quay
+        uses: redhat-actions/podman-login@50c2d9a331bb67c8fdab99b86455fad05e2e3252 # v2
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: '$oauthtoken'
+          password: ${{ secrets.QUAY_OAUTH_TOKEN }}
+          auth_file_path: ${{ runner.temp }}/auth.json
+
+      - name: Push images
+        run: tox -e custom -- push all
+        env:
+          REGISTRY_AUTH_FILE: ${{ runner.temp }}/auth.json

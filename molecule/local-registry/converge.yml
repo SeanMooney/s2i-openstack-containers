@@ -1,0 +1,24 @@
+---
+- name: Start the owned local registry under test
+  ansible.builtin.import_playbook: ../../playbooks/container-ci/local/registry.yaml
+  vars:
+    s2i_ci_repo_root: "{{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') }}"
+    s2i_ci_registry_root: >-
+      {{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') }}/.tmp/molecule/local-registry/registry
+    s2i_ci_registry_port: 15000
+
+- name: Wait for the owned local registry under test
+  ansible.builtin.import_playbook: ../../playbooks/container-ci/local/registry-ready.yaml
+  vars:
+    s2i_ci_registry_port: 15000
+
+- name: Adapt and validate the local registry under test
+  ansible.builtin.import_playbook: ../../playbooks/container-ci/local/pre.yaml
+  vars:
+    s2i_ci_install_host_packages: false
+    s2i_ci_install_tox: false
+    s2i_ci_output_dir: >-
+      {{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') }}/.tmp/molecule/local-registry/zuul-output
+    s2i_ci_registry_root: >-
+      {{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') }}/.tmp/molecule/local-registry/registry
+    s2i_ci_registry_port: 15000

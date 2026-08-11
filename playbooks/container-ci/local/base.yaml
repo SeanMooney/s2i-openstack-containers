@@ -1,0 +1,37 @@
+---
+- name: Emulate trusted base-job preparation locally
+  hosts: builder
+  gather_facts: false
+
+  tasks:
+    - name: Canonicalize the local repository root
+      ansible.builtin.command:
+        argv: [realpath, --canonicalize-existing, "{{ s2i_ci_repo_root }}"]
+      register: s2i_ci_local_repo_realpath
+      changed_when: false
+
+    - name: Canonicalize the local output directory
+      ansible.builtin.command:
+        argv: [realpath, --canonicalize-existing, "{{ s2i_ci_output_dir }}"]
+      register: s2i_ci_local_output_realpath
+      changed_when: false
+
+    - name: Canonicalize the local workspace root
+      ansible.builtin.command:
+        argv: [realpath, --canonicalize-existing, "{{ s2i_ci_workspace_root }}"]
+      register: s2i_ci_local_workspace_realpath
+      changed_when: false
+
+    - name: Require repository-local base-job paths
+      ansible.builtin.assert:
+        that:
+          - s2i_ci_local_output_realpath.stdout.startswith(
+              s2i_ci_local_repo_realpath.stdout + '/.tmp/')
+          - s2i_ci_local_workspace_realpath.stdout.startswith(
+              s2i_ci_local_repo_realpath.stdout + '/.tmp/')
+
+    - name: Prepare local output directories
+      ansible.builtin.include_role:
+        name: ensure-output-dirs
+      vars:
+        zuul_output_dir: "{{ s2i_ci_output_dir }}"

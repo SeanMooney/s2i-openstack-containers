@@ -1,0 +1,11 @@
+---
+- name: Record planned deployment metadata for selected image
+  ansible.builtin.set_fact:
+    s2i_ci_effective_image_mappings: >-
+      {{ s2i_ci_effective_image_mappings |
+         combine({s2i_ci_planned_image.image:
+                    s2i_ci_planned_image.deployment_keys}) }}
+    s2i_ci_mapping_sources: >-
+      {{ s2i_ci_mapping_sources |
+         combine({s2i_ci_planned_image.image:
+                    s2i_ci_planned_image.mapping_source}) }}

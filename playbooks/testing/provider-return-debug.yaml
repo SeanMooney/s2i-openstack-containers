@@ -1,0 +1,69 @@
+---
+- name: Print and validate selective provider return data
+  hosts: all
+  gather_facts: false
+  vars:
+    s2i_ci_expected_watcher_keys:
+      - watcherAPIImage
+      - watcherApplierImage
+      - watcherDecisionEngineImage
+
+  tasks:
+    - name: Require provider return variables
+      ansible.builtin.assert:
+        that:
+          - s2i_ci_content is mapping
+          - s2i_ci_content.registry is string
+          - s2i_ci_content.registry | length > 0
+          - s2i_ci_content.images is sequence
+          - s2i_ci_content.images is not string
+          - s2i_ci_content.images | length == 4
+          - s2i_ci_content.images |
+              select('search', '/openstack-base:') | list | length == 1
+          - s2i_ci_content.images |
+              select('search', '/openstack-watcher-base:') | list | length == 1
+          - s2i_ci_content.images |
+              select('search', '/openstack-cyborg:') | list | length == 1
+          - s2i_ci_content.images |
+              select('search', '/openstack-cyborg-agent:') | list | length == 1
+          - s2i_ci_content.images |
+              select('search', 'zuul-jobs.buildset-registry') |
+              list | length == 0
+          - content_provider_os_custom_container_images is mapping
+          - content_provider_os_custom_container_images.keys() | sort ==
+              s2i_ci_expected_watcher_keys | sort
+          - content_provider_registry_available | bool
+          - content_provider_registry_ip_port == s2i_ci_content.registry
+          - content_provider_os_registry_url == 'null'
+          - not content_provider_gating_repo_available | bool
+          - cifmw_build_images_output == {}
+        fail_msg: Selective provider return data is incomplete
+
+    - name: Require exact public image references
+      ansible.builtin.assert:
+        that:
+          - item.startswith(s2i_ci_content.registry + '/')
+          - item.count(':') >= 2
+      loop: "{{ s2i_ci_content.images }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Require one consolidated Watcher reference
+      ansible.builtin.assert:
+        that:
+          - content_provider_os_custom_container_images.watcherAPIImage ==
+              content_provider_os_custom_container_images.watcherApplierImage
+          - content_provider_os_custom_container_images.watcherAPIImage ==
+              content_provider_os_custom_container_images.watcherDecisionEngineImage
+          - >-
+            '/openstack-watcher-base:' in
+            content_provider_os_custom_container_images.watcherAPIImage
+
+    - name: Print returned container paths and deployment map
+      ansible.builtin.debug:
+        msg:
+          registry: "{{ s2i_ci_content.registry }}"
+          images: "{{ s2i_ci_content.images }}"
+          custom_container_images: >-
+            {{ content_provider_os_custom_container_images }}
+          mapping_sources: "{{ s2i_ci_content.mapping_sources }}"

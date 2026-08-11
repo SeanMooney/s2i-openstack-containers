@@ -1,0 +1,12 @@
+---
+- name: Record all effective deployment keys
+  ansible.builtin.set_fact:
+    s2i_ci_all_deployment_keys: >-
+      {{ s2i_ci_effective_image_mappings.values() | flatten | list }}
+
+- name: Reject duplicate deployment keys
+  ansible.builtin.assert:
+    that:
+      - s2i_ci_all_deployment_keys | unique | list | length ==
+          s2i_ci_all_deployment_keys | length
+    fail_msg: A deployment key may be assigned to only one image

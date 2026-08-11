@@ -1,0 +1,225 @@
+# Licensed under the Apache License, Version 2.0 (the "License"); you may
+# not use this file except in compliance with the License. You may obtain
+# a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+# WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+# License for the specific language governing permissions and limitations
+# under the License.
+
+"""Produce a deterministic plan for builder-owned workspace staging."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import pathlib
+import tempfile
+
+from openstack_image_builder import dependencies
+from openstack_image_builder import images
+from openstack_image_builder import packages
+from openstack_image_builder import projects
+from openstack_image_builder import selection
+from openstack_image_builder import sources
+
+
+PLAN_VERSION = 3
+
+
+def load_input(path: pathlib.Path) -> dict[str, object]:
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError("plan input must be a JSON object")
+    return value
+
+
+def required_string(value: dict[str, object], key: str) -> str:
+    item = value.get(key)
+    if not isinstance(item, str) or not item:
+        raise ValueError(f"plan input has no {key}")
+    return item
+
+
+def create(repo_root: pathlib.Path, value: dict[str, object]) -> dict[str, object]:
+    """Create a plan by reading, but never changing, prepared checkouts."""
+    containers_dir = repo_root / "containers"
+    if not containers_dir.is_dir():
+        raise ValueError(f"repository has no containers directory: {repo_root}")
+
+    workspace_root = required_string(value, "workspace_root")
+    if not pathlib.PurePosixPath(workspace_root).is_absolute():
+        raise ValueError("workspace_root must be an absolute path")
+    container_project = required_string(value, "container_project")
+    stream = required_string(value, "stream")
+    project_values = value.get("projects")
+    if not isinstance(project_values, dict):
+        raise ValueError("plan input projects must be a JSON object")
+
+    changed = selection.changed_projects(
+        value.get("zuul_items", []),
+        value.get("zuul_project"),
+        container_project,
+    )
+    direct_affected: dict[str, list[str]] = {}
+    unmatched: list[str] = []
+    if value.get("infer_images", True) is True:
+        for canonical_name in changed:
+            matched = selection.directly_affected_images(
+                repo_root, canonical_name, stream
+            )
+            if matched:
+                direct_affected[canonical_name] = matched
+            else:
+                unmatched.append(canonical_name)
+    workspace_path = pathlib.Path(workspace_root).resolve()
+    transitive_affected, transitive_projects = dependencies.resolve_transitive(
+        repo_root,
+        workspace_path,
+        project_values,
+        unmatched,
+        stream,
+    )
+    selected_data = selection.create(
+        repo_root=repo_root,
+        requested=value.get("images", []),
+        items=value.get("zuul_items", []),
+        primary_project=value.get("zuul_project"),
+        container_project=container_project,
+        stream=stream,
+        infer=value.get("infer_images", True),
+        direct_affected=direct_affected,
+        transitive_affected=transitive_affected,
+        transitive_projects=transitive_projects,
+    )
+    selected = selected_data["images"]
+    target_expression = selected_data["target_expression"]
+    contexts = images.context_scopes(selected)
+    metadata = images.effective_metadata(
+        repo_root, selected, value.get("image_mappings", {})
+    )
+    placements = sources.placement_records(
+        repo_root, selected, contexts, stream
+    )
+    for item in transitive_projects:
+        for image in item["affected_images"]:
+            if image not in selected:
+                continue
+            destination = (
+                f"{image}/src/overrides/{item['source_name']}"
+            )
+            projects.safe_relative_path(destination, "source destination")
+            placements.append(
+                {
+                    "name": item["source_name"],
+                    "canonical_name": item["canonical_name"],
+                    "url": None,
+                    "declared_ref": None,
+                    "maintained_commit": None,
+                    "manifest": None,
+                    "scope": image,
+                    "type": "repository",
+                    "origin": "transitive",
+                    "source_file": ".",
+                    "destination": destination,
+                    "distributions": item["distributions"],
+                }
+            )
+    destinations: dict[str, str] = {}
+    for placement in placements:
+        destination = str(placement["destination"])
+        previous = destinations.get(destination)
+        canonical_name = str(placement["canonical_name"])
+        if previous and previous != canonical_name:
+            raise ValueError(
+                f"source destination collision at {destination}: "
+                f"{previous} and {canonical_name}"
+            )
+        destinations[destination] = canonical_name
+
+    project_names = [container_project]
+    for placement in placements:
+        canonical_name = placement["canonical_name"]
+        if canonical_name not in project_names:
+            project_names.append(canonical_name)
+    planned_projects = [
+        projects.inventory_project(project_values, name) for name in project_names
+    ]
+    projects_by_name = {
+        item["canonical_name"]: item for item in planned_projects
+    }
+    planned_sources: list[dict[str, object]] = []
+    for placement in placements:
+        project = projects_by_name[placement["canonical_name"]]
+        planned_sources.append(
+            {
+                **placement,
+                "origin": placement.get("origin", "manifest"),
+                "src_dir": project["src_dir"],
+                "inventory_commit": project["inventory_commit"],
+                "authority": project["authority"],
+            }
+        )
+    source_packages, generated_files = packages.create(
+        repo_root,
+        workspace_path,
+        selected,
+        planned_sources,
+        projects_by_name,
+        stream,
+    )
+
+    return {
+        "version": PLAN_VERSION,
+        "workspace_root": workspace_root,
+        "container_project": container_project,
+        "stream": stream,
+        "selection": selected_data,
+        "images": selected,
+        "target_expression": target_expression,
+        "contexts": contexts,
+        "projects": planned_projects,
+        "image_metadata": metadata,
+        "sources": planned_sources,
+        "source_packages": source_packages,
+        "generated_files": generated_files,
+    }
+
+
+def write_atomic(path: pathlib.Path, value: dict[str, object]) -> None:
+    """Atomically write the planner's only output."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    content = json.dumps(value, indent=2, sort_keys=True) + "\n"
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        delete=False,
+    ) as stream:
+        temporary = pathlib.Path(stream.name)
+        stream.write(content)
+        stream.flush()
+        os.fsync(stream.fileno())
+    try:
+        os.replace(temporary, path)
+    except OSError:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def run(args: argparse.Namespace) -> None:
+    repo_root = pathlib.Path(args.repo_root).resolve()
+    input_path = pathlib.Path(args.input).resolve()
+    output_path = pathlib.Path(args.output).resolve()
+    write_atomic(output_path, create(repo_root, load_input(input_path)))
+
+
+def add_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--repo-root", required=True)
+    parser.add_argument("--input", required=True)
+    parser.add_argument("--output", required=True)

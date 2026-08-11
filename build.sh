@@ -83,6 +83,11 @@
 #   PIP_NO_BINARY     If set, passed as --build-arg to buildah so Containerfiles
 #                     can set ENV PIP_NO_BINARY. Use ":all:" to force pip to
 #                     build all packages from source instead of using wheels.
+#   S2I_CONTEXTS_ROOT Root of complete prepared build contexts. When set,
+#                     build.sh does not materialize sources under containers/.
+#   ERROR_ON_CLONE    Fail rather than enter a Git clone/fetch fallback.
+#   REGISTRY_AUTH_FILE Authentication file passed explicitly to buildah push.
+#   REGISTRY_CERT_DIR  TLS certificate directory passed explicitly to buildah push.
 
 set -euo pipefail
 
@@ -102,7 +107,13 @@ UPSTREAM_CONSTRAINTS="upper-constraints.txt"
 DEFAULT_STREAM="${DEFAULT_STREAM:-master}"
 SKIP_HASH_UPDATE="${SKIP_HASH_UPDATE:-}"
 PIP_NO_BINARY="${PIP_NO_BINARY:-}"
+S2I_CONTEXTS_ROOT="${S2I_CONTEXTS_ROOT:-}"
+ERROR_ON_CLONE="${ERROR_ON_CLONE:-}"
+REGISTRY_AUTH_FILE="${REGISTRY_AUTH_FILE:-}"
+REGISTRY_CERT_DIR="${REGISTRY_CERT_DIR:-}"
 PARALLEL="${PARALLEL:-$(nproc)}"
+SOURCE_REFS_STREAM="${STREAM//\//%2F}"
+SOURCE_REFS_MANIFEST="${REPO_ROOT}/.tmp/source-maintenance/frozen-source-refs.${SOURCE_REFS_STREAM}.tsv"
 
 # Discover all buildable images from the directory structure.
 discover_images() {
@@ -174,17 +185,29 @@ image_tag_args() {
   echo "${args}"
 }
 
-# Track which repos were auto-cloned so we can clean up
+# Track temporary source and frozen-ref repositories so they can be cleaned.
 declare -A _AUTO_CLONED=()
+declare -A _FROZEN_REPOSITORIES=()
 
-# Remove auto-cloned sources on exit
 cleanup_auto() {
-  for src_dir in "${!_AUTO_CLONED[@]}"; do
-    echo "--- Removing auto-cloned source: ${src_dir} ---"
-    rm -rf "${src_dir}"
+  local path
+  for path in "${!_AUTO_CLONED[@]}"; do
+    echo "--- Removing auto-cloned source: ${path} ---"
+    rm -rf "${path}"
+  done
+  for path in "${_FROZEN_REPOSITORIES[@]}"; do
+    rm -rf "${path}"
   done
 }
 trap cleanup_auto EXIT
+
+require_clone_allowed() {
+  local description="$1"
+  if [[ -n "${ERROR_ON_CLONE}" ]]; then
+    echo "ERROR: ${description} requires source acquisition while ERROR_ON_CLONE is set" >&2
+    return 1
+  fi
+}
 
 # Ensure constraints file exists for a project.
 # Looks for an "upper-constraints" entry in the project's sources.txt
@@ -205,6 +228,7 @@ ensure_project_constraints() {
       [[ -z "${entry_stream}" || "${entry_stream}" == \#* ]] && continue
       [[ "${entry_stream}" != "${stream}" ]] && continue
       if [[ "${name}" == "upper-constraints" ]]; then
+        require_clone_allowed "constraints for ${project}" || return 1
         echo "--- Fetching ${UPSTREAM_CONSTRAINTS}.${stream} for ${project} from ${url} at ${pinned_hash} ---"
         local tmp_repo
         tmp_repo=$(mktemp -d)
@@ -233,6 +257,7 @@ clone_at_hash() {
   if [[ -d "${dest}" ]]; then
     return
   fi
+  require_clone_allowed "source ${url} at ${pinned_hash}" || return 1
 
   mkdir -p "$(dirname "${dest}")"
   echo "--- Cloning ${url} at ${pinned_hash} into ${dest} ---"
@@ -275,6 +300,34 @@ ensure_sources_for_stream() {
   fi
 }
 
+# Resolve the complete context used for one image. Prepared contexts must stay
+# beneath this repository's isolated .tmp tree.
+build_context() {
+  local dir_name="$1"
+  local project
+  project="$(project_name "${dir_name}")"
+  if [[ -n "${S2I_CONTEXTS_ROOT}" ]]; then
+    local prepared_root
+    prepared_root=$(realpath -e "${S2I_CONTEXTS_ROOT}") || return 1
+    case "${prepared_root}/" in
+      "${REPO_ROOT}/.tmp/"*) ;;
+      *)
+        echo "ERROR: Prepared contexts must remain beneath ${REPO_ROOT}/.tmp" >&2
+        return 1
+        ;;
+    esac
+    if [[ -n "${project}" ]]; then
+      echo "${prepared_root}/${project}"
+    else
+      echo "${prepared_root}/${dir_name}"
+    fi
+  elif [[ -n "${project}" ]]; then
+    echo "${CONTAINERS_DIR}/${project}"
+  else
+    echo "${CONTAINERS_DIR}/${dir_name}"
+  fi
+}
+
 # Build a single image
 build_image() {
   local dir_name="$1"
@@ -282,14 +335,30 @@ build_image() {
   full_tag="$(image_tag "${dir_name}")"
   local project
   project="$(project_name "${dir_name}")"
+  local context_dir
+  context_dir="$(build_context "${dir_name}")" || return 1
+  local containerfile
+  if [[ -n "${project}" ]]; then
+    containerfile="${context_dir}/${dir_name#*/}/Containerfile"
+  else
+    containerfile="${context_dir}/Containerfile"
+  fi
 
   echo "=== Building ${full_tag} ==="
+  if [[ ! -d "${context_dir}" || ! -f "${containerfile}" ]]; then
+    echo "ERROR: Prepared image context is incomplete: ${context_dir}" >&2
+    return 1
+  fi
 
   # openstack-base image: no service source, build context is its own directory
   if [[ -z "${project}" ]]; then
     local base_constraints="${CONSTRAINTS_FILE}.${STREAM}"
-    local base_lock="${CONTAINERS_DIR}/${dir_name}/${base_constraints}"
+    local base_lock="${context_dir}/${base_constraints}"
     if [[ ! -f "${base_lock}" ]]; then
+      if [[ -n "${S2I_CONTEXTS_ROOT}" ]]; then
+        echo "ERROR: Prepared constraints not found at ${base_lock}" >&2
+        return 1
+      fi
       ensure_project_constraints "${dir_name}" "${STREAM}"
       base_constraints="${UPSTREAM_CONSTRAINTS}.${STREAM}"
     fi
@@ -298,8 +367,8 @@ build_image() {
       --build-arg "CONSTRAINTS_FILE=${base_constraints}" \
       --build-arg "BASE_IMAGE=${BASE_IMAGE}" \
       ${PIP_NO_BINARY:+--build-arg "PIP_NO_BINARY=${PIP_NO_BINARY}"} \
-      -f "${CONTAINERS_DIR}/${dir_name}/Containerfile" \
-      "${CONTAINERS_DIR}/${dir_name}/"
+      -f "${containerfile}" \
+      "${context_dir}/"
     return
   fi
 
@@ -310,11 +379,12 @@ build_image() {
     return 1
   fi
 
-  # Clone sources for this stream
-  ensure_sources_for_stream "${dir_name}" "${STREAM}"
+  if [[ -z "${S2I_CONTEXTS_ROOT}" ]]; then
+    ensure_sources_for_stream "${dir_name}" "${STREAM}"
+  fi
 
   # Verify main source exists
-  local sources_dir="${CONTAINERS_DIR}/${project}/src"
+  local sources_dir="${context_dir}/src"
   local src="${sources_dir}/${project}"
   if [[ ! -d "${src}" ]]; then
     echo "ERROR: Main source not found at ${src}" >&2
@@ -322,21 +392,38 @@ build_image() {
     return 1
   fi
 
-  # Prefer lockfile (<CONSTRAINTS_FILE>.<stream>) if available, otherwise fall back to upstream constraints
+  # Prepared builds require OIB-planned per-image package inputs. Standalone
+  # builds retain the committed project lock and tracked direct-source map.
+  local image_dir="${dir_name#*/}"
   local build_constraints="${CONSTRAINTS_FILE}.${STREAM}"
-  local lock_file="${CONTAINERS_DIR}/${project}/${build_constraints}"
-  if [[ ! -f "${lock_file}" ]]; then
+  local source_package_map="${image_dir}/source-package-map.txt"
+  if [[ -n "${S2I_CONTEXTS_ROOT}" ]]; then
+    build_constraints="${image_dir}/requirements.lock.effective.${STREAM}"
+    source_package_map="${image_dir}/source-package-map.effective.txt"
+    local prepared_input
+    for prepared_input in "${build_constraints}" "${source_package_map}"; do
+      if [[ ! -f "${context_dir}/${prepared_input}" ]]; then
+        echo "ERROR: Prepared package input not found at ${context_dir}/${prepared_input}" >&2
+        return 1
+      fi
+    done
+  elif [[ ! -f "${context_dir}/${build_constraints}" ]]; then
     ensure_project_constraints "${project}" "${STREAM}"
     build_constraints="${UPSTREAM_CONSTRAINTS}.${STREAM}"
+  fi
+  if [[ ! -f "${context_dir}/${source_package_map}" ]]; then
+    echo "ERROR: Source package map not found at ${context_dir}/${source_package_map}" >&2
+    return 1
   fi
 
   buildah bud \
     $(image_tag_args "${dir_name}") \
     --build-arg "CONSTRAINTS_FILE=${build_constraints}" \
+    --build-arg "SOURCE_PACKAGE_MAP=${source_package_map}" \
     --build-arg "BASE_IMAGE=${BASE_IMAGE}" \
     ${PIP_NO_BINARY:+--build-arg "PIP_NO_BINARY=${PIP_NO_BINARY}"} \
-    -f "${CONTAINERS_DIR}/${dir_name}/Containerfile" \
-    "${CONTAINERS_DIR}/${project}/"
+    -f "${containerfile}" \
+    "${context_dir}/"
 }
 
 # Check that all tags of an image exist locally
@@ -370,10 +457,32 @@ push_image() {
   name="$(image_name "${dir_name}")"
 
   IFS=',' read -ra tags <<< "${TAG}"
+  local registry_args=()
+  [[ -n "${REGISTRY_AUTH_FILE}" ]] && \
+    registry_args+=(--authfile "${REGISTRY_AUTH_FILE}")
+  [[ -n "${REGISTRY_CERT_DIR}" ]] && \
+    registry_args+=(--cert-dir "${REGISTRY_CERT_DIR}")
+
   for t in "${tags[@]}"; do
     local full_tag="${REGISTRY}/${NAMESPACE}/${name}:${t}"
     echo "=== Pushing ${full_tag} ==="
-    buildah push "${full_tag}"
+    buildah push "${registry_args[@]}" "${full_tag}"
+  done
+}
+
+# Print the exact image references produced for a target.
+target_refs() {
+  local dir_name
+  local name
+  local tag
+  local -a tags
+  resolve_targets_array "$@" || return 1
+  for dir_name in "${_RESOLVED_TARGETS[@]}"; do
+    name="$(image_name "${dir_name}")"
+    IFS=',' read -ra tags <<< "${TAG}"
+    for tag in "${tags[@]}"; do
+      echo "${REGISTRY}/${NAMESPACE}/${name}:${tag}"
+    done
   done
 }
 
@@ -397,142 +506,364 @@ list_images() {
   fi
 }
 
-# Resolve which images to process
+# Resolve one or more image expressions in their requested order. A
+# comma-separated expression is an explicit ordered union and includes base
+# when it selects a service image. Separate positional targets preserve the
+# upstream multi-target behavior.
 resolve_targets() {
-  local target="$1"
   local all_images
   all_images=($(discover_images))
+  local -a resolved=()
+  local expression item image item_images
+  declare -A seen=()
 
-  if [[ "${target}" == "all" ]]; then
-    echo "${all_images[@]}"
-    return
-  fi
-
-  # Exact match
-  for dir_name in "${all_images[@]}"; do
-    if [[ "${dir_name}" == "${target}" ]]; then
-      echo "${target}"
+  for expression in "$@"; do
+    if [[ "${expression}" == "all" ]]; then
+      echo "${all_images[@]}"
       return
     fi
+
+    if [[ "${expression}" == *,* ]]; then
+      local -a requested
+      local selected_service=0
+      IFS=',' read -ra requested <<< "${expression}"
+      for item in "${requested[@]}"; do
+        if [[ -z "${item}" || "${item}" != "${item//[[:space:]]/}" ]]; then
+          echo "ERROR: Invalid empty or whitespace-containing target '${item}'" >&2
+          return 1
+        fi
+        if ! item_images=$(resolve_targets "${item}"); then
+          return 1
+        fi
+        for image in ${item_images}; do
+          [[ "${image}" != "base" ]] && selected_service=1
+          if [[ -z "${seen[${image}]:-}" ]]; then
+            resolved+=("${image}")
+            seen["${image}"]=1
+          fi
+        done
+      done
+      if [[ ${selected_service} -eq 1 && -z "${seen[base]:-}" ]]; then
+        resolved=("base" "${resolved[@]}")
+        seen[base]=1
+      fi
+      continue
+    fi
+
+    local found=0
+    for image in "${all_images[@]}"; do
+      if [[ "${image}" == "${expression}" ]]; then
+        if [[ -z "${seen[${image}]:-}" ]]; then
+          resolved+=("${image}")
+          seen["${image}"]=1
+        fi
+        found=1
+        break
+      fi
+    done
+    [[ ${found} -eq 1 ]] && continue
+
+    for image in "${all_images[@]}"; do
+      if [[ "${image}" == "${expression}/"* ]]; then
+        if [[ -z "${seen[${image}]:-}" ]]; then
+          resolved+=("${image}")
+          seen["${image}"]=1
+        fi
+        found=1
+      fi
+    done
+    [[ ${found} -eq 1 ]] && continue
+
+    echo "ERROR: Unknown image or project '${expression}'" >&2
+    echo "Available images:" >&2
+    for image in "${all_images[@]}"; do
+      echo "  ${image}" >&2
+    done
+    return 1
   done
 
-  # Project prefix match
-  local matched=()
-  for dir_name in "${all_images[@]}"; do
-    if [[ "${dir_name}" == "${target}/"* ]]; then
-      matched+=("${dir_name}")
+  if [[ ${#resolved[@]} -eq 0 ]]; then
+    echo "ERROR: Explicit target selection is empty" >&2
+    return 1
+  fi
+  echo "${resolved[@]}"
+}
+
+# Resolve an expression without losing failures in command substitutions.
+declare -a _RESOLVED_TARGETS=()
+resolve_targets_array() {
+  local output
+  if ! output=$(resolve_targets "$@"); then
+    return 1
+  fi
+  _RESOLVED_TARGETS=(${output})
+}
+
+# Collect selected source manifests in deterministic target order. The parallel
+# arrays describe the manifest, source checkout directory, and project context.
+declare -a _SOURCE_FILES=()
+declare -a _SOURCE_DIRS=()
+declare -a _SOURCE_PROJECT_DIRS=()
+collect_source_scopes() {
+  local -a targets
+  local img project sources_file
+  declare -A seen=()
+
+  resolve_targets_array "$@" || return 1
+  targets=("${_RESOLVED_TARGETS[@]}")
+  _SOURCE_FILES=()
+  _SOURCE_DIRS=()
+  _SOURCE_PROJECT_DIRS=()
+
+  for img in "${targets[@]}"; do
+    project="$(project_name "${img}")"
+    if [[ -z "${project}" ]]; then
+      [[ "${img}" == "base" ]] || continue
+      sources_file="${CONTAINERS_DIR}/base/sources.txt"
+      if [[ -f "${sources_file}" && -z "${seen[${sources_file}]:-}" ]]; then
+        seen["${sources_file}"]=1
+        _SOURCE_FILES+=("${sources_file}")
+        _SOURCE_DIRS+=("${CONTAINERS_DIR}/base/src")
+        _SOURCE_PROJECT_DIRS+=("${CONTAINERS_DIR}/base")
+      fi
+      continue
+    fi
+
+    sources_file="${CONTAINERS_DIR}/${project}/sources.txt"
+    if [[ -f "${sources_file}" && -z "${seen[${sources_file}]:-}" ]]; then
+      seen["${sources_file}"]=1
+      _SOURCE_FILES+=("${sources_file}")
+      _SOURCE_DIRS+=("${CONTAINERS_DIR}/${project}/src")
+      _SOURCE_PROJECT_DIRS+=("${CONTAINERS_DIR}/${project}")
+    fi
+
+    sources_file="${CONTAINERS_DIR}/${img}/sources.txt"
+    if [[ -f "${sources_file}" && -z "${seen[${sources_file}]:-}" ]]; then
+      seen["${sources_file}"]=1
+      _SOURCE_FILES+=("${sources_file}")
+      _SOURCE_DIRS+=("${CONTAINERS_DIR}/${img}/src")
+      _SOURCE_PROJECT_DIRS+=("${CONTAINERS_DIR}/${project}")
     fi
   done
+}
 
-  if [[ ${#matched[@]} -gt 0 ]]; then
-    echo "${matched[@]}"
+source_record_key() {
+  printf '%s\x1f%s\x1f%s\x1f%s' "$1" "$2" "$3" "$4"
+}
+
+source_ref_key() {
+  printf '%s\x1f%s' "$1" "$2"
+}
+
+declare -A _FROZEN_COMMITS=()
+declare -A _FROZEN_AUTHORITIES=()
+declare -A _FROZEN_REF_COMMITS=()
+
+# Fetch one declared ref into a temporary bare repository and retain its exact
+# commit for the rest of this process. This prevents a moving branch from
+# changing inputs after preflight.
+freeze_remote_ref() {
+  local url="$1"
+  local ref="$2"
+  local ref_key repository
+  ref_key="$(source_ref_key "${url}" "${ref}")"
+  if [[ -n "${_FROZEN_REF_COMMITS[${ref_key}]:-}" ]]; then
+    _FREEZE_RESULT="${_FROZEN_REF_COMMITS[${ref_key}]}"
     return
   fi
 
-  echo "ERROR: Unknown image or project '${target}'" >&2
-  echo "Available images:" >&2
-  for dir_name in "${all_images[@]}"; do
-    echo "  ${dir_name}" >&2
-  done
-  return 1
-}
-
-# Clone a repo at a branch tip (or tag) and store the resolved commit hash
-# in _CLONE_RESULT.  Must NOT be called via command substitution ($(...))
-# because _AUTO_CLONED assignments would be lost in the subshell.
-# If the destination already exists, use it as-is (same policy as clone_at_hash).
-# Args: <dest_dir> <url> <branch>
-clone_at_branch() {
-  local dest="$1"
-  local url="$2"
-  local branch="$3"
-
-  if [[ -d "${dest}" ]]; then
-    echo "--- Using existing source: ${dest} ---"
-  else
-    mkdir -p "$(dirname "${dest}")"
-    echo "--- Cloning ${url} (${branch}) into ${dest} ---"
-    if ! git clone --branch "${branch}" "${url}" "${dest}" 2>/dev/null; then
-      git clone "${url}" "${dest}" 2>/dev/null
-      git -C "${dest}" checkout "${branch}"
-    fi
-    _AUTO_CLONED["${dest}"]=1
+  repository=$(mktemp -d)
+  git -C "${repository}" init --quiet --bare
+  if ! git -C "${repository}" fetch --quiet "${url}" "${ref}"; then
+    echo "ERROR: Could not freeze ref '${ref}' for ${url}" >&2
+    rm -rf "${repository}"
+    return 1
   fi
-
-  _CLONE_RESULT=$(git -C "${dest}" rev-parse HEAD)
+  if ! _FREEZE_RESULT=$(git -C "${repository}" rev-parse --verify 'FETCH_HEAD^{commit}'); then
+    echo "ERROR: Ref '${ref}' for ${url} does not resolve to a commit" >&2
+    rm -rf "${repository}"
+    return 1
+  fi
+  _FROZEN_REF_COMMITS["${ref_key}"]="${_FREEZE_RESULT}"
+  _FROZEN_REPOSITORIES["${ref_key}"]="${repository}"
 }
 
-# Update pinned hashes in a single sources.txt file for the given stream.
-# Clones source repos at the branch tip to resolve hashes, and extracts
-# upper-constraints.txt when encountered.
-# Args: <sources_file> <stream> <src_dir> <project_dir>
+validate_stream_name() {
+  local stream="$1"
+  local component
+  local -a components
+  if [[ ! "${stream}" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] || \
+     [[ "${stream}" == */ || "${stream}" == *//* ]]; then
+    echo "ERROR: Unsafe stream name '${stream}'" >&2
+    return 1
+  fi
+  IFS='/' read -ra components <<< "${stream}"
+  for component in "${components[@]}"; do
+    if [[ "${component}" == "." || "${component}" == ".." ]]; then
+      echo "ERROR: Unsafe stream name '${stream}'" >&2
+      return 1
+    fi
+  done
+}
+
+# Resolve and record every selected source before the first tracked mutation.
+freeze_source_refs() {
+  local stream="${!#}"
+  local targets_args=("${@:1:$#-1}")
+  local manifest_dir manifest_tmp
+  local index line entry_stream name url branch pinned_hash extra
+  local sources_file src_dir relative_file record_key authority frozen
+
+  validate_stream_name "${stream}" || return 1
+  collect_source_scopes "${targets_args[@]}" || return 1
+  _FROZEN_COMMITS=()
+  _FROZEN_AUTHORITIES=()
+  _FROZEN_REF_COMMITS=()
+  _FROZEN_REPOSITORIES=()
+
+  manifest_dir="$(dirname "${SOURCE_REFS_MANIFEST}")"
+  if [[ "${manifest_dir}" != "${REPO_ROOT}/.tmp/source-maintenance" ]]; then
+    echo "ERROR: Frozen source manifest escaped repository temporary state" >&2
+    return 1
+  fi
+  mkdir -p "${manifest_dir}"
+  rm -f "${SOURCE_REFS_MANIFEST}"
+  manifest_tmp=$(mktemp "${manifest_dir}/.frozen-source-refs.XXXXXX")
+  printf 'source_file\tstream\tname\turl\tdeclared_ref\tcommitted_pin\tfrozen_commit\tauthority\n' > "${manifest_tmp}"
+
+  for index in "${!_SOURCE_FILES[@]}"; do
+    sources_file="${_SOURCE_FILES[${index}]}"
+    src_dir="${_SOURCE_DIRS[${index}]}"
+    relative_file="${sources_file#"${REPO_ROOT}/"}"
+    while IFS= read -r line; do
+      [[ -z "${line}" || "${line}" == \#* ]] && continue
+      read -r entry_stream name url branch pinned_hash extra <<< "${line}"
+      [[ "${entry_stream}" == "${stream}" ]] || continue
+      if [[ -z "${name}" || -z "${url}" || -z "${branch}" || -z "${pinned_hash}" || -n "${extra:-}" ]]; then
+        echo "ERROR: Malformed source record in ${relative_file}: ${line}" >&2
+        rm -f "${manifest_tmp}"
+        return 1
+      fi
+
+      record_key="$(source_record_key "${sources_file}" "${name}" "${url}" "${branch}")"
+      if [[ "${name}" != "upper-constraints" && -d "${src_dir}/${name}" ]]; then
+        local checkout_root
+        checkout_root=$(git -C "${src_dir}/${name}" rev-parse --show-toplevel 2>/dev/null || true)
+        if [[ -z "${checkout_root}" || "$(realpath -e "${checkout_root}")" != "$(realpath -e "${src_dir}/${name}")" ]] || \
+           ! frozen=$(git -C "${src_dir}/${name}" rev-parse --verify 'HEAD^{commit}' 2>/dev/null); then
+          echo "ERROR: Pre-existing source is not a Git checkout: ${src_dir}/${name}" >&2
+          rm -f "${manifest_tmp}"
+          return 1
+        fi
+        authority="pre-existing-checkout"
+      else
+        if [[ -n "${SKIP_HASH_UPDATE}" ]]; then
+          freeze_remote_ref "${url}" "${pinned_hash}" || {
+            rm -f "${manifest_tmp}"
+            return 1
+          }
+          authority="committed-pin"
+        else
+          freeze_remote_ref "${url}" "${branch}" || {
+            rm -f "${manifest_tmp}"
+            return 1
+          }
+          authority="declared-ref"
+        fi
+        frozen="${_FREEZE_RESULT}"
+      fi
+
+      _FROZEN_COMMITS["${record_key}"]="${frozen}"
+      _FROZEN_AUTHORITIES["${record_key}"]="${authority}"
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "${relative_file}" "${entry_stream}" "${name}" "${url}" \
+        "${branch}" "${pinned_hash}" "${frozen}" "${authority}" \
+        >> "${manifest_tmp}"
+    done < "${sources_file}"
+  done
+
+  mv "${manifest_tmp}" "${SOURCE_REFS_MANIFEST}"
+  echo "--- Frozen source references: ${SOURCE_REFS_MANIFEST} ---"
+}
+
+# Materialize one source declaration from its frozen preflight repository and
+# update its maintained pin only in advancement mode.
 update_sources_file() {
   local sources_file="$1"
   local stream="$2"
   local src_dir="$3"
   local project_dir="$4"
-
-  if [[ ! -f "${sources_file}" ]]; then
-    return
-  fi
-
-  local tmp_file
-  tmp_file=$(mktemp)
+  local tmp_file line entry_stream name url branch pinned_hash extra
+  local record_key ref_key frozen authority repository output_tmp
   local updated=0
 
+  tmp_file=$(mktemp)
   while IFS= read -r line; do
-    # Preserve comments and blank lines
     if [[ -z "${line}" || "${line}" == \#* ]]; then
       echo "${line}" >> "${tmp_file}"
       continue
     fi
 
-    read -r entry_stream name url branch pinned_hash <<< "${line}"
-
-    # Only update entries for the requested stream
+    read -r entry_stream name url branch pinned_hash extra <<< "${line}"
     if [[ "${entry_stream}" != "${stream}" ]]; then
       echo "${line}" >> "${tmp_file}"
       continue
     fi
 
-    local new_hash
-    if [[ "${name}" == "upper-constraints" ]]; then
-      # Clone without checkout, resolve hash from branch, extract file
-      local uc_tmp
-      uc_tmp=$(mktemp -d)
-      git clone --no-checkout "${url}" "${uc_tmp}" 2>/dev/null
-      new_hash=$(git -C "${uc_tmp}" rev-parse --verify "origin/${branch}" 2>/dev/null \
-        || git -C "${uc_tmp}" rev-parse --verify "${branch}" 2>/dev/null)
-      git -C "${uc_tmp}" checkout "${new_hash}" -- upper-constraints.txt
-      cp "${uc_tmp}/upper-constraints.txt" "${project_dir}/${UPSTREAM_CONSTRAINTS}.${stream}"
-      rm -rf "${uc_tmp}"
-    elif [[ -d "${src_dir}/${name}" ]]; then
-      # Pre-existing checkout — use it for pip-compile but don't update the hash
-      echo "  ${name}: skipped (pre-existing checkout at ${src_dir}/${name})"
-      new_hash="${pinned_hash}"
-    else
-      clone_at_branch "${src_dir}/${name}" "${url}" "${branch}"
-      new_hash="${_CLONE_RESULT}"
-    fi
-
-    if [[ -z "${new_hash}" ]]; then
-      echo "ERROR: Could not resolve ref '${branch}' for ${url}" >&2
-      rm "${tmp_file}"
+    record_key="$(source_record_key "${sources_file}" "${name}" "${url}" "${branch}")"
+    frozen="${_FROZEN_COMMITS[${record_key}]:-}"
+    authority="${_FROZEN_AUTHORITIES[${record_key}]:-}"
+    if [[ -z "${frozen}" || -z "${authority}" ]]; then
+      echo "ERROR: Missing frozen source record for ${name} in ${sources_file}" >&2
+      rm -f "${tmp_file}"
       return 1
     fi
 
-    if [[ "${new_hash}" != "${pinned_hash}" ]]; then
-      echo "  ${name}: ${pinned_hash:-<empty>} → ${new_hash} (${branch})"
+    if [[ "${authority}" == "pre-existing-checkout" ]]; then
+      echo "  ${name}: skipped (pre-existing checkout at ${src_dir}/${name})"
+    else
+      if [[ "${authority}" == "committed-pin" ]]; then
+        ref_key="$(source_ref_key "${url}" "${pinned_hash}")"
+      else
+        ref_key="$(source_ref_key "${url}" "${branch}")"
+      fi
+      repository="${_FROZEN_REPOSITORIES[${ref_key}]:-}"
+      if [[ -z "${repository}" || ! -d "${repository}" ]]; then
+        echo "ERROR: Missing frozen repository for ${name}" >&2
+        rm -f "${tmp_file}"
+        return 1
+      fi
+
+      if [[ "${name}" == "upper-constraints" ]]; then
+        output_tmp=$(mktemp "${project_dir}/.${UPSTREAM_CONSTRAINTS}.${stream}.XXXXXX")
+        if ! git -C "${repository}" show "${frozen}:upper-constraints.txt" > "${output_tmp}"; then
+          rm -f "${output_tmp}" "${tmp_file}"
+          return 1
+        fi
+        mv "${output_tmp}" "${project_dir}/${UPSTREAM_CONSTRAINTS}.${stream}"
+      else
+        mkdir -p "${src_dir}"
+        echo "--- Materializing ${url} at ${frozen} into ${src_dir}/${name} ---"
+        git -C "${src_dir}" init --quiet "${name}"
+        _AUTO_CLONED["${src_dir}/${name}"]=1
+        git -C "${src_dir}/${name}" fetch --quiet "${repository}" "${frozen}"
+        git -C "${src_dir}/${name}" checkout --quiet --detach FETCH_HEAD
+      fi
+    fi
+
+    if [[ -z "${SKIP_HASH_UPDATE}" && "${authority}" != "pre-existing-checkout" && "${frozen}" != "${pinned_hash}" ]]; then
+      echo "  ${name}: ${pinned_hash} → ${frozen} (${branch})"
+      pinned_hash="${frozen}"
       updated=1
     fi
-    echo "${entry_stream} ${name} ${url} ${branch} ${new_hash}" >> "${tmp_file}"
+    echo "${entry_stream} ${name} ${url} ${branch} ${pinned_hash}" >> "${tmp_file}"
   done < "${sources_file}"
 
   if [[ ${updated} -eq 1 ]]; then
     mv "${tmp_file}" "${sources_file}"
   else
     rm "${tmp_file}"
-    echo "  (no changes)"
+    echo "  (no pin changes)"
   fi
 }
 
@@ -674,7 +1005,8 @@ generate_requirements_lock() {
     pip-compile --allow-unsafe --strip-extras \
       -c "${UPSTREAM_CONSTRAINTS}.${stream}" \
       -o "${lock_file}" \
-      "${input_files[@]}")
+      "${input_files[@]}" && \
+    sed -i "/# This file is autogenerated/{N;d;}" "${lock_file}")
 
   local rpm_pkgs
   rpm_pkgs=$(collect_rpm_python_packages "${project_dir}")
@@ -690,8 +1022,8 @@ generate_requirements_lock() {
 # Expects sources to be already cloned and constraints fetched
 # (done by update_sources). Cloned repos are cleaned up on exit.
 generate_locks_for_targets() {
-  local target="$1"
-  local stream="$2"
+  local stream="${!#}"
+  local targets_args=("${@:1:$#-1}")
 
   if ! command -v pip-compile &>/dev/null; then
     echo "ERROR: pip-compile not found. Install it with: pip install pip-tools" >&2
@@ -699,7 +1031,7 @@ generate_locks_for_targets() {
   fi
 
   local targets
-  targets=($(resolve_targets "${target}"))
+  targets=($(resolve_targets "${targets_args[@]}"))
 
   declare -A _lock_projects_seen
   for img in "${targets[@]}"; do
@@ -733,14 +1065,16 @@ generate_buildrequirements_lock() {
   echo "--- Generating ${project_dir}/${build_lock_file} ---"
   (cd "${project_dir}" && \
     pybuild-deps compile \
+      --no-annotate \
       -o "${build_lock_file}" \
-      "${CONSTRAINTS_FILE}.${stream}")
+      "${CONSTRAINTS_FILE}.${stream}" && \
+    sed -i "/# This file is autogenerated/{N;d;}" "${build_lock_file}")
 }
 
 # Generate buildrequirements.lock for each project in the target scope.
 generate_buildlocks_for_targets() {
-  local target="$1"
-  local stream="$2"
+  local stream="${!#}"
+  local targets_args=("${@:1:$#-1}")
 
   if ! command -v pybuild-deps &>/dev/null; then
     echo "ERROR: pybuild-deps not found. Install it with: pip install pybuild-deps" >&2
@@ -748,7 +1082,7 @@ generate_buildlocks_for_targets() {
   fi
 
   local targets
-  targets=($(resolve_targets "${target}"))
+  targets=($(resolve_targets "${targets_args[@]}"))
 
   declare -A _buildlock_projects_seen
   for img in "${targets[@]}"; do
@@ -838,10 +1172,8 @@ HEADER
 
 # Generate rpms.in.yaml for each project in the target scope.
 generate_rpms_in_for_targets() {
-  local target="$1"
-
   local targets
-  targets=($(resolve_targets "${target}"))
+  targets=($(resolve_targets "$@"))
 
   declare -A _rpms_projects_seen
   for img in "${targets[@]}"; do
@@ -862,8 +1194,8 @@ generate_rpms_in_for_targets() {
 # Clones repos at the pinned hashes already recorded in sources.txt and
 # fetches upper-constraints.txt at those same hashes.
 ensure_sources_for_targets() {
-  local target="$1"
-  local stream="$2"
+  local stream="${!#}"
+  local targets_args=("${@:1:$#-1}")
 
   if [[ -z "${stream}" ]]; then
     echo "ERROR: STREAM is required for update-sources." >&2
@@ -871,7 +1203,7 @@ ensure_sources_for_targets() {
   fi
 
   local targets
-  targets=($(resolve_targets "${target}"))
+  targets=($(resolve_targets "${targets_args[@]}"))
 
   declare -A _ensure_projects_seen
 
@@ -896,107 +1228,80 @@ ensure_sources_for_targets() {
   done
 }
 
-# Update sources.txt files for targets in scope.
-# Clones source repos at branch tips to resolve hashes, fetches
-# upper-constraints.txt, and updates pinned hashes in sources.txt.
+# Materialize all preflight-frozen sources and update maintained pins only when
+# SKIP_HASH_UPDATE is unset.
 update_sources() {
-  local target="$1"
-  local stream="$2"
+  local stream="${!#}"
+  local index sources_file
 
   if [[ -z "${stream}" ]]; then
     echo "ERROR: STREAM is required for update-sources." >&2
     echo "       Example: STREAM=master ./build.sh update-sources watcher" >&2
     return 1
   fi
+  if [[ ${#_SOURCE_FILES[@]} -eq 0 ]]; then
+    echo "ERROR: Source preflight did not collect any manifests" >&2
+    return 1
+  fi
 
-  local targets
-  targets=($(resolve_targets "${target}"))
-
-  declare -A projects_seen
-
-  for img in "${targets[@]}"; do
-    local project
-    project="$(project_name "${img}")"
-
-    # Base container: flat layout, sources.txt directly in containers/base/
-    if [[ -z "${project}" ]]; then
-      if [[ "${img}" == "base" ]] && [[ -z "${projects_seen[base]:-}" ]]; then
-        projects_seen["base"]=1
-        local base_sources="${CONTAINERS_DIR}/base/sources.txt"
-        if [[ -f "${base_sources}" ]]; then
-          echo "--- Updating ${base_sources} (stream: ${stream}) ---"
-          if ! update_sources_file "${base_sources}" "${stream}" \
-                "${CONTAINERS_DIR}/base/src" \
-                "${CONTAINERS_DIR}/base"; then
-            echo "ERROR: Failed to update ${base_sources}" >&2
-            return 1
-          fi
-        fi
-      fi
-      continue
-    fi
-
-    # Project-level sources.txt (only process once per project)
-    if [[ -z "${projects_seen[$project]:-}" ]]; then
-      projects_seen["${project}"]=1
-      local project_sources="${CONTAINERS_DIR}/${project}/sources.txt"
-      if [[ -f "${project_sources}" ]]; then
-        echo "--- Updating ${project_sources} (stream: ${stream}) ---"
-        if ! update_sources_file "${project_sources}" "${stream}" \
-              "${CONTAINERS_DIR}/${project}/src" \
-              "${CONTAINERS_DIR}/${project}"; then
-          echo "ERROR: Failed to update ${project_sources}" >&2
-          return 1
-        fi
-      fi
-    fi
-
-    # Image-level sources.txt
-    local image_sources="${CONTAINERS_DIR}/${img}/sources.txt"
-    if [[ -f "${image_sources}" ]]; then
-      echo "--- Updating ${image_sources} (stream: ${stream}) ---"
-      if ! update_sources_file "${image_sources}" "${stream}" \
-            "${CONTAINERS_DIR}/${img}/src" \
-            "${CONTAINERS_DIR}/${project}"; then
-        echo "ERROR: Failed to update ${image_sources}" >&2
-        return 1
-      fi
+  for index in "${!_SOURCE_FILES[@]}"; do
+    sources_file="${_SOURCE_FILES[${index}]}"
+    echo "--- Updating ${sources_file} (stream: ${stream}) ---"
+    if ! update_sources_file "${sources_file}" "${stream}" \
+          "${_SOURCE_DIRS[${index}]}" \
+          "${_SOURCE_PROJECT_DIRS[${index}]}"; then
+      echo "ERROR: Failed to update ${sources_file}" >&2
+      return 1
     fi
   done
 }
 
 # Main
 ACTION="${1:-}"
-TARGET="${2:-all}"
+shift || true
+if [[ $# -gt 0 ]]; then
+  TARGETS=("$@")
+else
+  TARGETS=("all")
+fi
 
 case "${ACTION}" in
   build)
-    for img in $(resolve_targets "${TARGET}"); do
+    for img in $(resolve_targets "${TARGETS[@]}"); do
       build_image "${img}"
     done
     ;;
   build-parallel)
-    _bp_targets=($(resolve_targets "${TARGET}"))
-
-    # Build base first (all service images depend on it)
-    for _bp_img in "${_bp_targets[@]}"; do
-      [[ -n "$(project_name "${_bp_img}")" ]] && continue
-      build_image "${_bp_img}"
-    done
-
-    # Pre-clone sources so parallel builds don't race on the same directories
-    for _bp_img in "${_bp_targets[@]}"; do
-      [[ -z "$(project_name "${_bp_img}")" ]] && continue
-      ensure_sources_for_stream "${_bp_img}" "${STREAM}"
-    done
-
-    # Build service images in parallel (max PARALLEL at a time)
+    _bp_targets=($(resolve_targets "${TARGETS[@]}"))
+    if [[ ! "${PARALLEL}" =~ ^[1-9][0-9]*$ ]]; then
+      echo "ERROR: PARALLEL must be a positive integer" >&2
+      exit 1
+    fi
     if [[ -n "${BUILD_LOGS_DIR:-}" ]]; then
       _bp_logdir="${BUILD_LOGS_DIR}"
       mkdir -p "${_bp_logdir}"
     else
       _bp_logdir=$(mktemp -d)
     fi
+
+    # Build base first (all service images depend on it)
+    for _bp_img in "${_bp_targets[@]}"; do
+      [[ -n "$(project_name "${_bp_img}")" ]] && continue
+      set -o pipefail
+      build_image "${_bp_img}" 2>&1 |
+        sed -u "s|^|[${_bp_img}] |" |
+        tee "${_bp_logdir}/${_bp_img//\//_}.log"
+    done
+
+    # Pre-clone only for the standalone path. Prepared contexts are complete.
+    if [[ -z "${S2I_CONTEXTS_ROOT}" ]]; then
+      for _bp_img in "${_bp_targets[@]}"; do
+        [[ -z "$(project_name "${_bp_img}")" ]] && continue
+        ensure_sources_for_stream "${_bp_img}" "${STREAM}"
+      done
+    fi
+
+    # Build service images in parallel (max PARALLEL at a time)
     _bp_service_imgs=()
     for _bp_img in "${_bp_targets[@]}"; do
       [[ -z "$(project_name "${_bp_img}")" ]] && continue
@@ -1005,52 +1310,51 @@ case "${ACTION}" in
 
     if [[ ${#_bp_service_imgs[@]} -gt 0 ]]; then
       echo "--- Building ${#_bp_service_imgs[@]} images (max ${PARALLEL} parallel) ---"
-      declare -A _bp_pids=()
+      _bp_pids=()
       _bp_fail=0
       _bp_running=0
 
       for _bp_img in "${_bp_service_imgs[@]}"; do
-        # Wait for a slot if at the limit
         while [[ ${_bp_running} -ge ${PARALLEL} ]]; do
-          if ! wait -n; then
+          _bp_pid="${_bp_pids[0]}"
+          if wait "${_bp_pid}"; then
+            _bp_pids=("${_bp_pids[@]:1}")
+            ((_bp_running--)) || true
+          else
             _bp_fail=1
             break 2
           fi
-          ((_bp_running--)) || true
         done
 
         _bp_log="${_bp_logdir}/${_bp_img//\//_}.log"
-        build_image "${_bp_img}" > "${_bp_log}" 2>&1 &
-        _bp_pids[$!]="${_bp_img}"
+        (
+          set -o pipefail
+          build_image "${_bp_img}" 2>&1 |
+            sed -u "s|^|[${_bp_img}] |" |
+            tee "${_bp_log}"
+        ) &
+        _bp_pids+=("$!")
         ((_bp_running++)) || true
       done
 
-      # Wait for remaining builds
       if [[ ${_bp_fail} -eq 0 ]]; then
-        while [[ ${_bp_running} -gt 0 ]]; do
-          if ! wait -n; then
+        for _bp_pid in "${_bp_pids[@]}"; do
+          if wait "${_bp_pid}"; then
+            ((_bp_running--)) || true
+          else
             _bp_fail=1
             break
           fi
-          ((_bp_running--)) || true
         done
       fi
 
-      # Show logs for all builds
-      for _bp_log in "${_bp_logdir}"/*.log; do
-        _bp_name=$(basename "${_bp_log}" .log)
-        echo "=== ${_bp_name} ==="
-        cat "${_bp_log}"
-        echo ""
-      done
-
       if [[ ${_bp_fail} -eq 1 ]]; then
-        echo "ERROR: A build failed, killing remaining builds" >&2
-        for _bp_pid in "${!_bp_pids[@]}"; do
+        echo "ERROR: A build failed; stopping remaining builds" >&2
+        for _bp_pid in "${_bp_pids[@]}"; do
           kill "${_bp_pid}" 2>/dev/null || true
         done
         wait 2>/dev/null || true
-        [[ -z "${BUILD_LOGS_DIR:-}" ]] && rm -rf "${_bp_logdir}"
+        echo "Build logs are available in ${_bp_logdir}" >&2
         exit 1
       fi
 
@@ -1059,7 +1363,7 @@ case "${ACTION}" in
     fi
     ;;
   push)
-    _push_targets=($(resolve_targets "${TARGET}"))
+    _push_targets=($(resolve_targets "${TARGETS[@]}"))
 
     # Verify all images and tags exist before pushing any
     echo "--- Verifying all images exist locally ---"
@@ -1072,32 +1376,34 @@ case "${ACTION}" in
       push_image "${img}"
     done
     ;;
+  refs)
+    target_refs "${TARGETS[@]}"
+    ;;
   update-sources)
     if [[ -n "${SKIP_HASH_UPDATE}" ]]; then
-      echo "=== Skipping hash update (SKIP_HASH_UPDATE is set) ==="
-      ensure_sources_for_targets "${TARGET}" "${STREAM}"
-    else
-      update_sources "${TARGET}" "${STREAM}"
+      echo "=== Keeping committed hashes (SKIP_HASH_UPDATE is set) ==="
     fi
+    freeze_source_refs "${TARGETS[@]}" "${STREAM}"
+    update_sources "${TARGETS[@]}" "${STREAM}"
 
     # Generate lockfiles and metadata
     echo ""
     echo "=== Generating rpms.in.yaml files ==="
-    generate_rpms_in_for_targets "${TARGET}"
+    generate_rpms_in_for_targets "${TARGETS[@]}"
 
     echo ""
     echo "=== Generating requirements.lock files ==="
-    generate_locks_for_targets "${TARGET}" "${STREAM}"
+    generate_locks_for_targets "${TARGETS[@]}" "${STREAM}"
 
     echo ""
     echo "=== Generating buildrequirements.lock files ==="
-    generate_buildlocks_for_targets "${TARGET}" "${STREAM}"
+    generate_buildlocks_for_targets "${TARGETS[@]}" "${STREAM}"
 
     # Create un-streamed symlinks for the default stream
     if [[ "${STREAM}" == "${DEFAULT_STREAM}" ]]; then
       echo ""
       echo "=== Creating default stream symlinks (${DEFAULT_STREAM}) ==="
-      _symlink_targets=($(resolve_targets "${TARGET}"))
+      _symlink_targets=($(resolve_targets "${TARGETS[@]}"))
       declare -A _symlink_seen
       for _s_img in "${_symlink_targets[@]}"; do
         _s_project="$(project_name "${_s_img}")"
@@ -1141,7 +1447,7 @@ case "${ACTION}" in
     list_images
     ;;
   *)
-    echo "Usage: STREAM=<name> $0 {build|build-parallel|push|update-sources|install-deps|list} [image-name|all]"
+    echo "Usage: STREAM=<name> $0 {build|build-parallel|push|refs|update-sources|install-deps|list} [target ...]"
     echo ""
     echo "Images (discovered from containers/):"
     for dir_name in $(discover_images); do
@@ -1165,6 +1471,8 @@ case "${ACTION}" in
     echo "  BUILD_LOGS_DIR    Persist build-parallel logs to this directory"
     echo "  SKIP_HASH_UPDATE  Skip updating pinned hashes; regenerate locks only"
     echo "  PIP_NO_BINARY     Pass PIP_NO_BINARY to container build (e.g., ':all:')"
+    echo "  REGISTRY_AUTH_FILE  Registry authentication file for pushes"
+    echo "  REGISTRY_CERT_DIR   Registry TLS certificate directory for pushes"
     echo ""
     echo "Source directories: containers/<project>/src/<name>/"
     echo "Overrides:          containers/<project>/src/overrides/<pkg>/"

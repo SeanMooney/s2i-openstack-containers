@@ -1,0 +1,182 @@
+---
+- name: Collect Zuul container logs
+  hosts: builder
+  gather_facts: false
+  vars:
+    s2i_ci_output_dir: "{{ ansible_user_dir }}/zuul-output"
+    s2i_ci_log_dir: "{{ s2i_ci_output_dir }}/logs/container-build"
+
+  tasks:
+    - name: Ensure the container build log directory exists
+      ansible.builtin.file:
+        path: "{{ s2i_ci_log_dir }}"
+        state: directory
+        mode: "0755"
+      failed_when: false
+
+    - name: Collect buildset registry logs
+      block:
+        - name: Run the trusted container log collection role
+          ansible.builtin.include_role:
+            name: collect-container-logs
+          vars:
+            container_command: podman
+      rescue:
+        - name: Report non-fatal Zuul container log collection failure
+          ansible.builtin.debug:
+            msg: Container log collection failed; registry cleanup will continue
+
+- name: Remove exact workflow images
+  ansible.builtin.import_playbook: ../shared/cleanup-images.yaml
+
+- name: Remove isolated source-planning state
+  hosts: builder
+  gather_facts: false
+  vars:
+    s2i_ci_workspace_root: "{{ zuul_user_dir | default(ansible_user_dir) }}"
+
+  tasks:
+    - name: Resolve the inventory-described container repository
+      when:
+        - zuul is mapping
+        - zuul.projects is mapping
+        - s2i_ci_container_project in zuul.projects
+      ansible.builtin.set_fact:
+        s2i_ci_container_repo: >-
+          {{ s2i_ci_workspace_root }}/{{
+             zuul.projects[s2i_ci_container_project].src_dir }}
+
+    - name: Canonicalize workspace root for planning cleanup
+      ansible.builtin.command:
+        argv:
+          - realpath
+          - --canonicalize-existing
+          - "{{ s2i_ci_workspace_root }}"
+      register: s2i_ci_cleanup_workspace_realpath
+      changed_when: false
+      failed_when: false
+
+    - name: Canonicalize container repository for planning cleanup
+      when: s2i_ci_container_repo is defined
+      ansible.builtin.command:
+        argv:
+          - realpath
+          - --canonicalize-existing
+          - "{{ s2i_ci_container_repo }}"
+      register: s2i_ci_cleanup_repo_realpath
+      changed_when: false
+      failed_when: false
+
+    - name: Require safe source-planning cleanup path
+      when: s2i_ci_container_repo is defined
+      ansible.builtin.assert:
+        that:
+          - s2i_ci_cleanup_workspace_realpath.rc == 0
+          - s2i_ci_cleanup_repo_realpath.rc == 0
+          - s2i_ci_cleanup_repo_realpath.stdout.startswith(
+              s2i_ci_cleanup_workspace_realpath.stdout + '/')
+
+    - name: Remove source-planning repository state
+      when: s2i_ci_container_repo is defined
+      ansible.builtin.file:
+        path: "{{ s2i_ci_container_repo }}/.tmp"
+        state: absent
+
+- name: Remove the project-owned Zuul buildset registry
+  hosts: builder
+  gather_facts: false
+  vars:
+    s2i_ci_output_dir: "{{ ansible_user_dir }}/zuul-output"
+    s2i_ci_registry_root: "{{ ansible_user_dir }}/buildset_registry"
+    s2i_ci_registry_connection_file: >-
+      {{ s2i_ci_output_dir }}/.s2i-ci-registry-connection.json
+    s2i_ci_registry_port: 5000
+
+  tasks:
+    - name: Check buildset registry ownership
+      ansible.builtin.stat:
+        path: "{{ s2i_ci_registry_root }}/.s2i-ci-registry-owner.json"
+      register: s2i_ci_registry_owner_marker
+
+    - name: Default buildset registry ownership to unloaded
+      ansible.builtin.set_fact:
+        s2i_ci_registry_owner_loaded: false
+        s2i_ci_registry_owner_is_valid: false
+
+    - name: Load buildset registry ownership
+      when: s2i_ci_registry_owner_marker.stat.exists | default(false)
+      block:
+        - name: Read the buildset registry ownership marker
+          ansible.builtin.slurp:
+            src: "{{ s2i_ci_registry_root }}/.s2i-ci-registry-owner.json"
+          register: s2i_ci_registry_owner_data
+
+        - name: Decode the buildset registry ownership marker
+          ansible.builtin.set_fact:
+            s2i_ci_registry_owner: >-
+              {{ s2i_ci_registry_owner_data.content | b64decode | from_json }}
+
+        - name: Record successful ownership loading
+          ansible.builtin.set_fact:
+            s2i_ci_registry_owner_loaded: true
+      rescue:
+        - name: Refuse unreadable registry ownership metadata
+          ansible.builtin.fail:
+            msg: Refusing to clean a registry whose ownership marker is invalid
+
+    - name: Validate buildset registry ownership
+      when: s2i_ci_registry_owner_loaded | bool
+      ansible.builtin.assert:
+        that:
+          - s2i_ci_registry_owner.port | default(-1) | int ==
+              s2i_ci_registry_port | int
+          - s2i_ci_registry_owner.container | default('') ==
+              ('buildset_registry' if s2i_ci_registry_port | int == 5000
+               else 'buildset_registry_' + s2i_ci_registry_port | string)
+        fail_msg: Refusing to clean a registry with an invalid ownership marker
+
+    - name: Record valid buildset registry ownership
+      when: s2i_ci_registry_owner_loaded | bool
+      ansible.builtin.set_fact:
+        s2i_ci_registry_owner_is_valid: true
+
+    - name: Remove the project-owned buildset registry container
+      when:
+        - s2i_ci_registry_owner_loaded | bool
+        - s2i_ci_registry_owner_is_valid | bool
+      ansible.builtin.command:
+        argv:
+          - podman
+          - rm
+          - --force
+          - "{{ s2i_ci_registry_owner.container }}"
+      register: s2i_ci_removed_buildset_registry
+      changed_when: s2i_ci_removed_buildset_registry.stdout | length > 0
+
+    - name: Stop the project-owned buildset registry tunnel
+      when:
+        - s2i_ci_registry_owner_loaded | bool
+        - s2i_ci_registry_owner_is_valid | bool
+      ansible.builtin.shell: |
+        pids=$(pgrep -f '^socat -d -d TCP6-LISTEN:{{ s2i_ci_registry_owner.port }},fork TCP:127.0.0.1:1{{ s2i_ci_registry_owner.port }}$' || true)
+        if [ -n "$pids" ]; then
+          printf '%s\n' "$pids"
+          kill $pids
+        fi
+      args:
+        executable: /bin/bash
+      register: s2i_ci_stopped_registry_tunnel
+      changed_when: s2i_ci_stopped_registry_tunnel.stdout | length > 0
+
+    - name: Remove project-owned buildset registry state
+      when:
+        - s2i_ci_registry_owner_loaded | bool
+        - s2i_ci_registry_owner_is_valid | bool
+      ansible.builtin.file:
+        path: "{{ s2i_ci_registry_root }}"
+        state: absent
+
+    - name: Remove persisted buildset registry connection data
+      ansible.builtin.file:
+        path: "{{ s2i_ci_registry_connection_file }}"
+        state: absent

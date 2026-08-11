@@ -22,6 +22,8 @@ ARG CONSTRAINTS_FILE=requirements.lock
 ENV LANG="en_US.UTF-8"
 ENV TZ="UTC"
 ENV container="oci"
+ENV SSL_CERT_FILE=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
+ENV REQUESTS_CA_BUNDLE=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
 
 USER root
 

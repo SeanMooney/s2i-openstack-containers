@@ -1,0 +1,74 @@
+---
+- name: Prepare shared build tools locally
+  ansible.builtin.import_playbook: ../shared/prepare-host.yaml
+
+- name: Adapt the owned local registry to the shared connection contract
+  hosts: builder
+  gather_facts: false
+  vars:
+    s2i_ci_local_registry_connection_file: >-
+      {{ s2i_ci_registry_root }}/connection.json
+    s2i_ci_registry_connection_file: >-
+      {{ s2i_ci_output_dir }}/.s2i-ci-registry-connection.json
+
+  tasks:
+    - name: Load private local registry connection data
+      ansible.builtin.slurp:
+        src: "{{ s2i_ci_local_registry_connection_file }}"
+      register: s2i_ci_local_registry_data
+      no_log: true
+
+    - name: Decode private local registry connection data
+      ansible.builtin.set_fact:
+        s2i_ci_local_registry: >-
+          {{ s2i_ci_local_registry_data.content | b64decode | from_json }}
+      no_log: true
+
+    - name: Require safe local registry connection data
+      ansible.builtin.assert:
+        that:
+          - s2i_ci_local_registry.host == 'localhost'
+          - s2i_ci_local_registry.public_host == '127.0.0.1'
+          - s2i_ci_local_registry.port | int == s2i_ci_registry_port | int
+          - s2i_ci_local_registry.username is string
+          - s2i_ci_local_registry.password is string
+          - s2i_ci_local_registry.auth_file is string
+          - s2i_ci_local_registry.cert_dir is string
+      no_log: true
+
+    - name: Log in to the local registry
+      ansible.builtin.command:
+        argv:
+          - podman
+          - login
+          - --authfile
+          - "{{ s2i_ci_local_registry.auth_file }}"
+          - --cert-dir
+          - "{{ s2i_ci_local_registry.cert_dir }}"
+          - --username
+          - "{{ s2i_ci_local_registry.username }}"
+          - --password-stdin
+          - >-
+            {{ s2i_ci_local_registry.host ~ ':' ~
+               (s2i_ci_local_registry.port | string) }}
+        stdin: "{{ s2i_ci_local_registry.password }}"
+      no_log: true
+      changed_when: false
+
+    - name: Write normalized local registry connection data
+      ansible.builtin.copy:
+        dest: "{{ s2i_ci_registry_connection_file }}"
+        mode: "0600"
+        content: |
+          {{ {
+               'endpoint': s2i_ci_local_registry.host + ':' +
+                 (s2i_ci_local_registry.port | string),
+               'public_host': s2i_ci_local_registry.public_host,
+               'public_port': s2i_ci_local_registry.port,
+               'auth_file': s2i_ci_local_registry.auth_file,
+               'cert_dir': s2i_ci_local_registry.cert_dir
+             } | to_nice_json }}
+      no_log: true
+
+- name: Validate the normalized local registry
+  ansible.builtin.import_playbook: ../shared/validate-registry.yaml
