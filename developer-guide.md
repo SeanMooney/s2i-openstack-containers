@@ -1,0 +1,606 @@
+# S2I OpenStack Containers Developer Guide
+
+This guide explains how this repository builds OpenStack service containers,
+how source pins and generated dependency files fit together, and how
+contributors can validate changes. It describes only workflows available in
+this repository today.
+
+Konflux is authoritative for hermetic production provenance and publication.
+The shell and GitHub workflows described here are contributor and development
+interfaces; they do not replace that production authority.
+
+## How to read this guide
+
+New contributors should read Parts I through III before changing a
+Containerfile or dependency file. Parts IV through VI are task-oriented
+references.
+
+```text
+Part I    Purpose, repository map, and terminology
+Part II   Host preparation and quick starts
+Part III  Sources, generated files, and build architecture
+Part IV   Build and source-maintenance workflows
+Part V    Testing and validation
+Part VI   Maintenance and troubleshooting
+```
+
+Headings are intentionally not manually numbered below the part level. Use the
+Markdown outline or search for a heading name when following a reference.
+
+# Part I - Orientation
+
+## Repository purpose
+
+The repository produces UBI 10 based OpenStack service images from upstream Git
+sources. It keeps service revisions, Python constraints, build requirements,
+and RPM input lists in version control so a review can show the inputs expected
+by a build.
+
+The current image set is:
+
+```text
+base                       openstack-base
+cyborg/cyborg              openstack-cyborg
+cyborg/cyborg-agent        openstack-cyborg-agent
+watcher/watcher-base       openstack-watcher-base
+```
+
+`build.sh` is the build and source-maintenance interface. Buildah performs
+image builds and pushes. Podman is useful for inspecting and running the
+resulting images.
+
+## Publication authority
+
+Konflux owns hermetic production provenance and publication. Treat its recorded
+inputs and outputs as authoritative for production images.
+
+The GitHub workflows have narrower roles:
+
+- `build.yml` builds images for pull requests and manual runs.
+- `test.yml` runs tests and verifies source regeneration.
+- `linter.yml` runs repository checks.
+- `update-sources.yml` proposes source and generated-file updates.
+- `build-and-push.yml` builds on pushes to `main` and can be started manually.
+
+The last workflow publishes development tags to Quay after pushes to `main`
+and on approved manual runs. These convenient artifacts do not carry Konflux's
+hermetic production provenance and do not replace its production authority.
+
+## Repository map
+
+```text
+README.md                    short project entry point
+
+developer-guide.md           contributor architecture and workflow reference
+TESTING.md                   concise compatibility testing entry point
+build.sh                     build, push, and source-maintenance implementation
+tox.ini                      dependency-managed contributor commands
+pyproject.toml               Python lint and format configuration
+.pre-commit-config.yaml      repository-wide quality checks
+.ansible-lint                Ansible lint policy
+.zuul.yaml                   reusable unit and linter job definitions
+.github/workflows/           GitHub development automation
+containers/base/             common UBI-based runtime image
+containers/cyborg/           Cyborg source and image contexts
+containers/watcher/          Watcher source and image context
+tests/                       stdlib unittest suite
+.tmp/                        ignored generated test and tool state
+```
+
+A service project directory contains shared source and dependency data. Each
+image below it contains its Containerfile and image-specific dependency lists.
+
+```text
+containers/<project>/
+  sources.txt
+  requirements.lock.<stream>
+  buildrequirements.lock.<stream>
+  upper-constraints.txt.<stream>
+  rpms.in.yaml
+  src/
+  <image>/
+    Containerfile
+    bindeps.txt
+    builddeps.txt
+    pythondeps.txt
+    pythonbuilddeps.txt
+```
+
+## Terminology
+
+**Image target**
+: A buildable directory known to `build.sh`, such as `base`,
+  `cyborg/cyborg-agent`, or `watcher/watcher-base`.
+
+**Project**
+: A directory below `containers/` that can share sources and generated
+  dependency data across one or more images.
+
+**Stream**
+: A named set of source revisions and generated dependency files. `master` is
+  the maintained default stream.
+
+**Source pin**
+: The exact Git commit in a `sources.txt` record. The adjacent branch name
+  records which branch source maintenance follows; builds use the commit.
+
+**Build context**
+: The project directory passed to Buildah. It contains project-level sources
+  and the selected image subdirectory.
+
+**Maintained input**
+: A file edited by contributors, such as a Containerfile, `sources.txt`, or a
+  dependency list.
+
+**Generated file**
+: A tracked file produced by `build.sh update-sources`, such as a lock file,
+  constraints snapshot, RPM input file, or default-stream symlink.
+
+# Part II - Preparing and Building
+
+## Host prerequisites
+
+Building requires Linux, Git, Buildah, Podman, and enough storage for UBI base
+layers and Python wheels. Source maintenance also needs the Python tools pinned
+by tox.
+
+Install the container tools supported by the host package manager with:
+
+```console
+./build.sh install-deps
+```
+
+The command uses `sudo` and supports `dnf`, `microdnf`, and `apt-get`. It does
+not configure registry credentials or alter source pins.
+
+Tox manages Python test and generation dependencies. Use the repository's tox
+environments rather than installing those packages into the system Python.
+
+## Quick start: inspect targets
+
+```console
+./build.sh list
+```
+
+This discovers targets from the `containers/` directory and prints their final
+image names.
+
+## Quick start: build everything
+
+```console
+STREAM=master tox -e build
+```
+
+The build uses maintained `master` pins. It builds the base before service
+images and tags images under the default local naming scheme.
+
+For a narrower build, call the shell interface directly or through `custom`:
+
+```console
+STREAM=master ./build.sh build watcher
+STREAM=master tox -e custom -- build cyborg/cyborg-agent
+```
+
+A project target builds all images in that project. An image target builds only
+that image and its required base.
+
+## Quick start: run checks
+
+```console
+tox -e unit
+tox -e linters
+```
+
+The `test` and `py3` environments are aliases for the same unit suite:
+
+```console
+tox -e test
+tox -e py3
+```
+
+# Part III - Sources and Build Architecture
+
+## Source records
+
+A non-comment `sources.txt` line has five fields:
+
+```text
+<stream> <name> <repository-url> <branch-to-follow> <pinned-commit>
+```
+
+For example:
+
+```text
+master watcher https://opendev.org/openstack/watcher.git master <sha>
+```
+
+The branch field is maintenance input. A normal build checks out the exact
+commit. Updating branch tips is an explicit source-maintenance action.
+
+Source records can appear at global, project, or image level. Project sources
+are shared by every image in the project. Image sources add dependencies needed
+by only one image. `upper-constraints` is special: its file is fetched from the
+pinned OpenStack requirements revision instead of being treated as a service
+checkout.
+
+## Source checkout ownership
+
+Before a build, `build.sh` places missing repositories below the applicable
+`src/` directory. Checkouts created by the script are removed by its exit trap.
+A checkout already present before the command is used as-is and is not removed.
+This permits an intentional developer checkout to replace a maintained pin for
+a local experiment.
+
+That override is powerful and visible only in the local filesystem. Remove it
+before claiming that a result came from maintained pins.
+
+A transitive source override can be placed at:
+
+```text
+containers/<project>/src/overrides/<package>/
+```
+
+Containerfiles build directories found there as source packages. No additional
+`sources.txt` entry is required for this explicit developer override.
+
+## Maintained and generated files
+
+Edit these inputs directly:
+
+- `Containerfile`;
+- `sources.txt`;
+- `bindeps.txt` and `builddeps.txt`;
+- `pythondeps.txt` and `pythonbuilddeps.txt`;
+- base scripts and repository-maintained service configuration.
+
+Do not hand-edit these generated outputs:
+
+- `upper-constraints.txt.<stream>`;
+- `requirements.lock.<stream>`;
+- `buildrequirements.lock.<stream>`;
+- `rpms.in.yaml`;
+- unsuffixed default-stream symlinks.
+
+When a source record or dependency input changes, regenerate the related files
+in the same change. Review both the maintained input and generated diff.
+
+Tool caches, test state, and temporary checkouts belong below ignored `.tmp/`.
+Tests must not leave generated state elsewhere in the repository.
+
+## Base image
+
+`containers/base/Containerfile` starts from UBI 10 minimal. It installs common
+RPM and Python dependencies, Kolla helper scripts, service user/group support,
+and the common entry point. Service images refer to its resulting tag through
+the `BASE_IMAGE` build argument.
+
+## Service images
+
+Service Containerfiles use two stages.
+
+The build stage:
+
+1. copies project and image source directories;
+2. installs build-only RPM and Python dependencies;
+3. removes source-built package names from effective constraints;
+4. builds service and override wheels;
+5. builds remaining dependency wheels;
+6. records source package versions and commits; and
+7. generates service configuration where required.
+
+The runtime stage:
+
+1. starts from `openstack-base`;
+2. creates the service user;
+3. installs runtime RPM dependencies;
+4. installs the built wheels under the filtered constraints;
+5. installs configuration and Kolla integration; and
+6. switches to the deployed service user.
+
+`/source-built-packages.txt` in a service image records package, commit, and
+version information collected during the build.
+
+## Image names and tags
+
+The default naming inputs are:
+
+```text
+REGISTRY      localhost
+NAMESPACE     openstack
+IMAGE_PREFIX  openstack
+TAG           <stream>-latest
+```
+
+A target such as `watcher/watcher-base` therefore becomes
+`localhost/openstack/openstack-watcher-base:master-latest` for the `master`
+stream. `TAG` accepts a comma-separated list when multiple tags are needed.
+
+# Part IV - Contributor Workflows
+
+## Build commands
+
+Build one image serially:
+
+```console
+STREAM=master ./build.sh build watcher/watcher-base
+```
+
+Build all service images with bounded parallelism:
+
+```console
+STREAM=master PARALLEL=4 ./build.sh build-parallel all
+```
+
+The parallel command builds the base first, prepares shared sources, then runs
+service builds concurrently. Set `BUILD_LOGS_DIR` to retain per-image logs.
+
+Useful overrides include:
+
+```text
+REGISTRY
+NAMESPACE
+TAG
+IMAGE_PREFIX
+BASE_IMAGE
+CONSTRAINTS_FILE
+BUILD_CONSTRAINTS_FILE
+PARALLEL
+BUILD_LOGS_DIR
+PIP_NO_BINARY
+```
+
+Use `PIP_NO_BINARY=:all:` when specifically testing source distribution builds.
+It increases build time and is not needed for ordinary validation.
+
+## Push commands
+
+Authenticate to the destination registry before pushing. Then run:
+
+```console
+STREAM=master REGISTRY=quay.io NAMESPACE=<namespace> \
+  ./build.sh push all
+```
+
+The push operation verifies that every expected local tag exists before it
+pushes any target. This command is an explicit contributor action. It does not
+change Konflux's production authority.
+
+## Updating source pins and locks
+
+Advance source records and regenerate dependent files with:
+
+```console
+STREAM=master tox -e update-sources
+```
+
+To restrict work to one or more projects or images:
+
+```console
+STREAM=master tox -e update-sources -- watcher
+STREAM=master tox -e update-sources -- watcher cyborg/cyborg-agent
+```
+
+This resolves configured branch tips, updates exact source commits, refreshes
+constraints, regenerates RPM inputs and both lock-file classes, and recreates
+default-stream symlinks.
+
+Before changing any tracked file, the updater freezes every selected declared
+reference to one exact commit. It retains those fetched objects for the whole
+run, so a moving branch cannot supply different content after preflight. The
+atomic record is written to:
+
+```text
+.tmp/source-maintenance/frozen-source-refs.<stream>.tsv
+```
+
+A slash in a stream name is encoded as `%2F` in this filename. Unsafe stream
+components such as `.` or `..` are rejected before filesystem mutation.
+
+Each repository-ordered row records the source manifest, declared ref,
+committed pin, frozen effective commit, and authority. `declared-ref` means an
+advancement run resolved the maintained branch or tag. `committed-pin` means a
+pinned run used the existing SHA without querying a branch head.
+`pre-existing-checkout` means an intentional Git checkout below `src/` remained
+untouched and supplied its recorded HEAD while the maintained pin stayed
+unchanged. An unversioned source directory or any unresolvable ref fails the
+complete preflight before tracked mutation.
+
+To regenerate from the existing commits without advancing them:
+
+```console
+STREAM=master tox -e update-lockfiles
+```
+
+This is the reproducibility mode used by the unattached Zuul
+`s2i-openstack-containers-update-sources` job. The job uses the available
+Python runtime with an isolated tox cache, preserves the frozen manifest as a
+log artifact, and fails when regeneration leaves any tracked diff. Generated
+lock headers omit interpreter-version text so supported tooling runtimes do not
+create cosmetic drift. The scheduled/manual GitHub updater deliberately
+advances source pins; it is the freshness lane that proposes source movement.
+
+Maintained source records and dependency inputs are reviewable inputs.
+Stream-suffixed constraints snapshots, requirements locks, build-requirements
+locks, RPM input files, and default-stream symlinks are generator-owned outputs.
+Regenerate them together; do not hand-edit generated output to hide drift.
+
+Always inspect `git diff -- containers/` and compare updated pins with the
+frozen manifest. A clean command exit does not replace review of source changes
+and generated dependency movement.
+
+## Adding an image
+
+1. Create `containers/<project>/<image>/Containerfile`.
+2. Add its runtime and build dependency files.
+3. Add project-level or image-level source records as appropriate.
+4. Add an image `src/.gitkeep` only when an image-level source directory is
+   needed.
+5. Run source generation for the project.
+6. Build the image target.
+7. Run unit and linter validation.
+
+Follow an existing service Containerfile with similar runtime behavior. Keep
+build-only packages out of `bindeps.txt`, and keep runtime packages out of
+`builddeps.txt` unless they are genuinely needed in both stages.
+
+# Part V - Testing and Validation
+
+## Validation strategy
+
+Start with the narrowest check that proves a change, then broaden validation
+before publishing it. Tests use stdlib `unittest`; shell test harnesses are not
+part of the supported non-Ansible test model.
+
+A practical progression is:
+
+1. run the affected unit test module;
+2. run `tox -e unit`;
+3. run `tox -e linters`;
+4. regenerate files when maintained inputs changed; and
+5. build the affected image or project.
+
+## Unit tests
+
+Run the complete suite with:
+
+```console
+tox -e unit
+```
+
+For focused iteration, pass a unittest name pattern through the environment:
+
+```console
+tox -e unit -- -k test_name_pattern
+```
+
+Tests use temporary directories and local bare Git remotes so they do not
+change a contributor's source checkouts or container storage.
+
+## Formatting and static analysis
+
+Run:
+
+```console
+tox -e linters
+```
+
+Pre-commit checks whitespace, YAML, JSON, Python syntax, shell style,
+Containerfiles, Ruff formatting and lint rules, OpenStack Hacking conventions,
+and Ansible lint policy. Configuration is committed so local and automation
+interfaces use the same rules.
+
+## Automation coverage
+
+GitHub runs build, unit, linter, and source-update workflows as described in
+`Publication authority`. The repository also defines reusable unit, linter,
+and pinned source-reproducibility jobs in `.zuul.yaml`; project attachment is
+intentionally managed outside those job definitions. The
+source-reproducibility job is intentionally unattached in this repository
+snapshot.
+
+Neither development automation path changes Konflux's authority for hermetic
+production provenance and publication.
+
+## Generated-state checks
+
+After tests or source generation, run:
+
+```console
+git status --short
+git diff --check
+```
+
+Unexpected tracked changes indicate a test isolation bug or stale generated
+files. Tool-created untracked state should remain below `.tmp/`.
+
+# Part VI - Maintenance and Troubleshooting
+
+## Change-to-validation map
+
+| Change | Minimum focused validation |
+| --- | --- |
+| Python test/helper | affected unittest, `tox -e unit`, `tox -e linters` |
+| Containerfile | `tox -e linters`, affected image build |
+| Python dependency input | regenerate locks, unit, linter, affected build |
+| RPM dependency input | regenerate `rpms.in.yaml`, linter, affected build |
+| `sources.txt` | ordinary frozen refresh, inspect manifest/pins/locks, pinned clean refresh, affected build |
+| Generator-owned constraints, lock, RPM, or symlink | pinned refresh, require no tracked diff |
+| Source-maintenance job or runtime | focused updater tests, pinned clean refresh with the default Python, stale-output failure |
+| base image or script | unit, linter, build all service images |
+| GitHub workflow | YAML/linter checks and workflow review |
+
+## Build uses an unexpected source revision
+
+Check for a pre-existing checkout below the project or image `src/` directory.
+Such a checkout intentionally overrides `sources.txt`. Compare its `HEAD` with
+the maintained pin, then remove or relocate it when a pinned build is required.
+
+## A generated file changes unexpectedly
+
+Confirm `STREAM`, `TARGET`, `DEFAULT_STREAM`, and `SKIP_HASH_UPDATE`. Verify
+that all source records contain the expected exact commits. Re-run generation
+from a clean tree and compare the complete `containers/` diff.
+
+Moving branch tips can legitimately change pins when `SKIP_HASH_UPDATE` is not
+set. Compare the resulting pins with
+the stream-safe `.tmp/source-maintenance/frozen-source-refs.<stream>.tsv`;
+every updated pin must match its frozen `declared-ref` commit. Use pinned regeneration when testing
+determinism against committed sources.
+
+If preflight fails, inspect the named URL/ref and authority before retrying. A
+missing manifest means resolution stopped before the complete input set was
+frozen. A `pre-existing-checkout` row is an explicit local override: compare its
+recorded HEAD, then remove the checkout for a committed-pin reproduction.
+
+If pinned regeneration leaves a tracked diff, do not dismiss it as cache noise.
+Confirm `STREAM`, `TARGET`, and the isolated tox cache; verify every manifest
+row says `committed-pin` on a clean tree; then inspect the first changed
+generator-owned file and regenerate the complete selected scope. The Zuul
+post-run diff assertion intentionally treats this state as a stale-input
+failure.
+
+## A service package still comes from an index
+
+Verify the service repository exists in the applicable `sources.txt`, that the
+checkout appears under `src/`, and that its package metadata can be recognized
+by the Containerfile. Inspect `/source-built-packages.txt` in a successful
+image.
+
+## A build cannot find constraints or locks
+
+Check the stream-suffixed files in the project directory and the unsuffixed
+symlinks used by Containerfiles. Regenerate the project for the selected stream
+rather than manually repairing a generated symlink or lock file.
+
+## A parallel build fails without immediate context
+
+Set `BUILD_LOGS_DIR` and inspect the per-image files after the command exits:
+
+```console
+STREAM=master BUILD_LOGS_DIR=.tmp/build-logs \
+  ./build.sh build-parallel all
+```
+
+The current parallel implementation replays stored logs after the parallel
+phase. Use a serial build of the failing image when immediate terminal output
+is more useful.
+
+## Registry push fails
+
+Confirm login state, registry certificate trust, the `REGISTRY` and `NAMESPACE`
+values, and every expected local tag. The push command checks tags before
+starting, but authentication and network errors can still interrupt
+publication.
+
+## Contributor checklist
+
+Before proposing a change:
+
+1. confirm maintained and generated files are separated correctly;
+2. run the narrow unit test and the complete unit suite;
+3. run linters;
+4. regenerate dependencies when an input changed;
+5. build the affected image set;
+6. inspect `git status`, `git diff`, and `git diff --check`; and
+7. describe development publication accurately and keep Konflux production
+   authority explicit.
