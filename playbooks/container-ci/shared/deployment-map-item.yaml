@@ -1,0 +1,7 @@
+---
+- name: Expand image reference for each deployment key
+  ansible.builtin.set_fact:
+    s2i_ci_custom_container_images: >-
+      {{ s2i_ci_custom_container_images |
+         combine({item: s2i_ci_target_references[s2i_ci_image]}) }}
+  loop: "{{ s2i_ci_effective_image_mappings[s2i_ci_image] }}"

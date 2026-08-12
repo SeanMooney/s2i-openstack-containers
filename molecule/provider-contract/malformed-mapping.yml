@@ -1,0 +1,18 @@
+---
+- name: Reject malformed mapping value
+  hosts: builder
+  gather_facts: false
+  vars:
+    s2i_test_repo_root: "{{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') }}"
+    s2i_ci_container_repo: "{{ s2i_test_repo_root }}"
+    s2i_ci_image_mappings:
+      base: not-a-list
+    s2i_ci_effective_image_mappings: {}
+    s2i_ci_mapping_sources: {}
+
+  tasks:
+    - name: Validate malformed mapping fixture
+      ansible.builtin.include_tasks: >-
+        {{ s2i_test_repo_root }}/playbooks/container-ci/shared/image-metadata-item.yaml
+      vars:
+        s2i_ci_image: base

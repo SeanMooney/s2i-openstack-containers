@@ -1,0 +1,38 @@
+---
+- job:
+    name: s2i-openstack-containers-molecule
+    parent: tox
+    description: Run provider registry and cleanup contract scenarios.
+    nodeset: s2i-openstack-containers-image-builder
+    vars:
+      python_version: "3.12"
+      tox_envlist: molecule
+
+- nodeset:
+    name: s2i-openstack-containers-image-builder
+    nodes:
+      - name: builder
+        label: cloud-centos-10-stream
+
+- job:
+    name: s2i-openstack-container-content-provider
+    parent: base
+    description: |
+      Build and publish OpenStack service container images from committed
+      source pins for dependent jobs. This repository builds all maintained
+      images by default; child jobs can select a subset and add related
+      required projects. Speculative source consumption remains follow-up work.
+    timeout: 7200
+    nodeset: s2i-openstack-containers-image-builder
+    required-projects:
+      - github.com/openstack-k8s-operators/s2i-openstack-containers
+      - opendev.org/zuul/zuul-jobs
+    pre-run: playbooks/container-ci/zuul/pre.yaml
+    run: playbooks/container-ci/zuul/run.yaml
+    post-run: playbooks/container-ci/zuul/post.yaml
+    vars:
+      s2i_ci_container_project: >-
+        github.com/openstack-k8s-operators/s2i-openstack-containers
+      s2i_ci_images: all
+      s2i_ci_stream: master
+      s2i_ci_content_provider: true

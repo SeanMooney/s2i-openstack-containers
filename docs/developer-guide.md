@@ -308,6 +308,89 @@ All image tags are verified to exist locally before any push begins.
 ./build.sh list
 ```
 
+## Zuul content provider
+
+The `s2i-openstack-container-content-provider` job runs on the
+CentOS Stream 10 nodeset host named `builder`. All host preparation, registry
+validation, builds, publication, result generation, and cleanup target that
+host explicitly. The Zuul executor controls Ansible but does not perform those
+mutations.
+
+In this repository the provider defaults to `all`, so every maintained image
+is built from its exact `sources.txt` pins. A child job can set `s2i_ci_images`
+to an explicit list of image targets; the provider adds `base`, resolves the
+selection through `build.sh`, and publishes only that set.
+
+To compose the provider in an operator repository, inherit the job, add the
+container repository and any related repositories to `required-projects`, set
+`s2i_ci_container_project`, and override `s2i_ci_images` with the required
+subset. Zuul places those projects in the shared buildset workspace, but this
+provider does not yet consume speculative service checkouts or build operators.
+Those integrations remain follow-up scope; the current provider always uses
+maintained source pins.
+
+### Image deployment metadata
+
+The repository-level `containers/image-mappings.yaml` associates exact build
+targets with OpenStackVersion custom-image fields. Unlisted targets have no
+deployment mapping but are still built and returned. The consolidated
+`watcher/watcher-base` image declares:
+
+```yaml
+openstack_version:
+  custom_container_images:
+    watcher/watcher-base:
+      - watcherAPIImage
+      - watcherApplierImage
+      - watcherDecisionEngineImage
+```
+
+All three keys resolve to the same exact `openstack-watcher-base` reference.
+The image contains the API, applier, and decision-engine entry points and the
+union of their runtime dependencies. Watcher is intentionally not split into
+process-specific images.
+
+Both Cyborg images build and publish but are absent from the central mapping.
+Their exact references therefore appear in provider diagnostics without adding
+fields to the default deployment map.
+
+A child job may provide `s2i_ci_image_mappings` as a mapping from a selected
+image target to a replacement list of keys. Replacement is per image rather
+than additive. The provider records whether each effective list came from
+tracked or inventory metadata and rejects malformed values, unknown or unbuilt
+image targets, empty key strings, duplicate keys, and a key assigned to more
+than one image.
+
+### Registry and returned data
+
+The provider starts or inherits a Zuul buildset registry, validates push and
+pull with a dedicated UBI tag, builds and pushes the selected image set, and
+pulls every exact result back. Credentials and certificate data remain in
+Zuul secret data. Returned public diagnostics use the buildset registry's
+reachable host or IP and port, never the builder-local registry alias.
+
+`s2i_ci_content.images` contains every exact successful reference, including
+base and both unmapped Cyborg images. The partial
+`content_provider_os_custom_container_images` map contains only effective
+keys joined to exact successful references. The legacy global OS registry URL
+remains the neutral `null` sentinel, while its namespace/tag and gating-repo
+fields remain empty or false because this selective provider does not publish a
+complete OpenStack image namespace. `cifmw_build_images_output`
+remains an empty mapping and is not repurposed for service images.
+
+Intended references are written before build mutation. Post-run cleanup
+removes only those exact Podman pullback and Buildah build tags, verifies exact
+absence, and removes a buildset registry only when its ownership marker is
+valid.
+Per-image parallel logs and registry/result manifests are retained under
+`zuul-output/logs/container-build/`.
+
+The provider pauses while dependent jobs run. Private onboarding may attach a
+trivial child that prints the returned registry paths and maps. That debug job
+does not pull images, patch an OpenStackVersion resource, deploy OpenStack, or
+invoke a downstream repository's playbooks. Downstream consumption is separate
+work.
+
 ## Build architecture
 
 ### Base image (`openstack-base`)

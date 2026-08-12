@@ -1,0 +1,24 @@
+---
+- name: Select tracked deployment keys for validation
+  ansible.builtin.set_fact:
+    s2i_ci_tracked_mapping_keys: >-
+      {{ s2i_ci_tracked_image_mappings[s2i_ci_tracked_mapping_target] }}
+
+- name: Validate tracked deployment keys
+  ansible.builtin.assert:
+    that:
+      - s2i_ci_tracked_mapping_keys is sequence
+      - s2i_ci_tracked_mapping_keys is not string
+      - s2i_ci_tracked_mapping_keys | select('string') | list | length ==
+          s2i_ci_tracked_mapping_keys | length
+      - s2i_ci_tracked_mapping_keys |
+          reject('match', '^[A-Za-z][A-Za-z0-9]*$') | list | length == 0
+      - s2i_ci_tracked_mapping_keys | unique | list | length ==
+          s2i_ci_tracked_mapping_keys | length
+    fail_msg: >-
+      Invalid tracked image mapping for {{ s2i_ci_tracked_mapping_target }}
+
+- name: Accumulate tracked deployment keys
+  ansible.builtin.set_fact:
+    s2i_ci_tracked_deployment_keys: >-
+      {{ s2i_ci_tracked_deployment_keys + s2i_ci_tracked_mapping_keys }}

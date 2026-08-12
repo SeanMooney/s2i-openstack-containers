@@ -1,0 +1,89 @@
+---
+- name: Verify provider registry and cleanup contracts
+  hosts: builder
+  gather_facts: false
+  vars:
+    s2i_test_repo_root: "{{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') }}"
+    s2i_test_root: "{{ s2i_test_repo_root }}/.tmp/molecule/provider-contract"
+    s2i_test_validation_image: >-
+      registry.test:5000/s2i-validation/ubi10-minimal:latest
+    s2i_test_images:
+      - registry.test:5000/openstack/openstack-base:test
+      - registry.test:5000/openstack/openstack-watcher-base:test
+
+  tasks:
+    - name: Exercise invalid metadata contracts
+      ansible.builtin.command:
+        argv:
+          - ansible-playbook
+          - -i
+          - builder,
+          - -c
+          - local
+          - "{{ lookup('env', 'MOLECULE_SCENARIO_DIRECTORY') }}/{{ item }}"
+      loop:
+        - duplicate-metadata.yml
+        - unknown-mapping.yml
+        - malformed-mapping.yml
+      register: s2i_test_invalid_metadata
+      changed_when: false
+      failed_when: false
+
+    - name: Require invalid metadata to fail deterministically
+      ansible.builtin.assert:
+        that:
+          - s2i_test_invalid_metadata.results |
+              map(attribute='rc') | reject('equalto', 0) | list | length == 3
+          - >-
+            'A deployment key may be assigned to only one image' in
+            (s2i_test_invalid_metadata.results[0].stdout +
+             s2i_test_invalid_metadata.results[0].stderr)
+          - >-
+            'Image mapping overrides must name selected image targets' in
+            (s2i_test_invalid_metadata.results[1].stdout +
+             s2i_test_invalid_metadata.results[1].stderr)
+          - >-
+            'Invalid effective image mapping for base' in
+            (s2i_test_invalid_metadata.results[2].stdout +
+             s2i_test_invalid_metadata.results[2].stderr)
+
+    - name: Read final fake container storage
+      ansible.builtin.slurp:
+        src: "{{ s2i_test_root }}/state.json"
+      register: s2i_test_state_data
+
+    - name: Decode final fake container storage
+      ansible.builtin.set_fact:
+        s2i_test_state: >-
+          {{ s2i_test_state_data.content | b64decode | from_json }}
+
+    - name: Validate exact cleanup and retained source image
+      ansible.builtin.assert:
+        that:
+          - s2i_test_images | intersect(s2i_test_state.podman) | length == 0
+          - s2i_test_images | intersect(s2i_test_state.buildah) | length == 0
+          - s2i_test_validation_image not in s2i_test_state.podman
+          - >-
+            'registry.access.redhat.com/ubi10/ubi-minimal:latest' in
+            s2i_test_state.podman
+          - >-
+            ['podman', 'push', '--remove-signatures',
+             'registry.test:5000/s2i-validation/ubi10-minimal:latest'] in
+            s2i_test_state.commands
+          - >-
+            ['podman', 'image', 'rm', '--force', s2i_test_images[0]] in
+            s2i_test_state.commands
+          - >-
+            ['buildah', 'rmi', s2i_test_images[0]] in s2i_test_state.commands
+
+    - name: Check public registry state artifact
+      ansible.builtin.stat:
+        path: >-
+          {{ s2i_test_root }}/zuul-output/logs/container-build/registry-state.json
+      register: s2i_test_registry_state
+
+    - name: Require registry state artifact
+      ansible.builtin.assert:
+        that:
+          - s2i_test_registry_state.stat.exists
+          - s2i_test_registry_state.stat.mode == '0644'

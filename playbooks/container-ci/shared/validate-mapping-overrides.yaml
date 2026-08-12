@@ -1,0 +1,8 @@
+---
+- name: Reject mapping overrides for unselected images
+  ansible.builtin.assert:
+    that:
+      - s2i_ci_image_mappings is mapping
+      - s2i_ci_image_mappings.keys() |
+          difference(s2i_ci_selected_images) | length == 0
+    fail_msg: Image mapping overrides must name selected image targets
