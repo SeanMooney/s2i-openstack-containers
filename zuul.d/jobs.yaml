@@ -135,6 +135,25 @@
         - edpmNeutronMetadataAgentImage
         # Waiting for https://github.com/openstack-k8s-operators/openstack-operator/pull/2055
         - mariadbImage
+      # Heat is not part of the default control plane, so enable it during
+      # edpm_prepare (same phase where s2i injects its container images) so
+      # the mapped s2i heat images (heat/heat-api, heat/heat-engine) actually
+      # get deployed. Mirrors heat-operator's ci/tempest/ci_fw_vars.yaml.
+      cifmw_edpm_prepare_kustomizations:
+        - apiVersion: kustomize.config.k8s.io/v1beta1
+          kind: Kustomization
+          namespace: openstack
+          patches:
+            - patch: |-
+                apiVersion: core.openstack.org/v1beta1
+                kind: OpenStackControlPlane
+                metadata:
+                  name: unused
+                spec:
+                  heat:
+                    enabled: true
+              target:
+                kind: OpenStackControlPlane
       s2i_tempest_include_list: |
         tempest.api.compute.servers.test_create_server.ServersTestJSON.test_list_servers
         tempest.api.compute.servers.test_server_actions.ServerActionsTestJSON.test_reboot_server_hard
@@ -143,6 +162,7 @@
         tempest.api.network.test_networks.NetworksTest.test_list_networks
         tempest.api.volume.test_volumes_list.VolumesListTestJSON.test_volume_list
         tempest.scenario.test_server_basic_ops.TestServerBasicOps.test_server_basic_ops
+        heat_tempest_plugin.tests.functional.test_stack_tags.StackTagTest
 
 - job:
     name: s2i-openstack-container-consumer-smoke

@@ -70,18 +70,16 @@ RUN for src_dir in /src/*/ /src/overrides/*/; do \
 
 ENV PIP_NO_BINARY=""
 
-# Install wheels temporarily so entry points are available for config generation
+# Install wheels temporarily so data_files (rootwrap) are available
 RUN pip3 install --no-cache-dir --prefix=/usr \
       -c /tmp/build-constraints.txt \
       --find-links=/wheels/deps \
       --find-links=/wheels/pkgs \
       /wheels/pkgs/*.whl
 
-# Generate default config and collect upstream config files
+# Collect upstream config files
 RUN mkdir -p /configfiles/etc/glance && \
-    oslo-config-generator \
-      --config-file ${SERVICE_SRC}/etc/oslo-config-generator/glance-api.conf \
-      --output-file /configfiles/etc/glance/glance-api.conf && \
+    cp -a ${SERVICE_SRC}/etc/glance-api.conf /configfiles/etc/glance/ && \
     cp -a ${SERVICE_SRC}/etc/glance-api-paste.ini /configfiles/etc/glance/ && \
     cp -a ${SERVICE_SRC}/etc/metadefs /configfiles/etc/glance/metadefs && \
     cp -a /usr/etc/glance/rootwrap.conf /configfiles/etc/glance/ && \

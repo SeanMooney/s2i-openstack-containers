@@ -87,7 +87,8 @@ RUN for src_dir in /src/*/ /src/overrides/*/; do \
 
 
 RUN mkdir -p /configfiles/etc/cinder && \
-    cp -a ${SERVICE_SRC}/etc/cinder/api-paste.ini /configfiles/etc/cinder/
+    cp -a ${SERVICE_SRC}/etc/cinder/api-paste.ini /configfiles/etc/cinder/ && \
+    cp -a ${SERVICE_SRC}/etc/cinder/resource_filters.json /configfiles/etc/cinder/
 
 # --- Runtime stage ---
 FROM ${BASE_IMAGE}
@@ -120,9 +121,10 @@ RUN mkdir -p /etc/cinder /var/log/cinder /var/lib/cinder /var/cache/cinder && \
     chmod 770 /var/log/cinder /var/lib/cinder /var/cache/cinder
 
 COPY --from=build /configfiles/etc/cinder/api-paste.ini /etc/cinder/api-paste.ini
+COPY --from=build /configfiles/etc/cinder/resource_filters.json /etc/cinder/resource_filters.json
 
-RUN chmod 640 /etc/cinder/api-paste.ini && \
-    chown cinder:cinder /etc/cinder/api-paste.ini
+RUN chmod 640 /etc/cinder/api-paste.ini /etc/cinder/resource_filters.json && \
+    chown cinder:cinder /etc/cinder/api-paste.ini /etc/cinder/resource_filters.json
 
 RUN mkdir -p /var/www/cgi-bin/cinder
 COPY cinder-api/scripts/cinder-wsgi /var/www/cgi-bin/cinder
