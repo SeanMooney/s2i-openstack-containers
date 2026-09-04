@@ -494,6 +494,37 @@ validation, builds, publication, result generation, and cleanup target that
 host explicitly. The Zuul executor controls Ansible but does not perform those
 mutations.
 
+The provider copies the RDO base job's `/etc/pip.conf` into a job-local file
+and mounts it into Buildah so Python downloads use the provider mirror. It also
+can run an ephemeral Squid container directly with Podman. Squid caches direct
+upstream HTTP traffic or can sit in front of the provider's CentOS mirror. The
+cache is published on the disposable builder and Buildah RUN steps reach it through
+`host.containers.internal`. Proxy values are passed as build arguments so
+host-side base-image pulls are not routed through the package cache. The cache
+intentionally listens without authentication on all interfaces of the
+disposable CI builder. Plain-HTTP CentOS Stream requests can be remapped to the
+provider's CentOS mirror. Otherwise, Squid rewrites plain-HTTP CentOS requests
+to the upstream HTTPS origin before fetching them, without intercepting client
+TLS. The job does not consume host RPM repository files or require
+`podman-compose`. Post-run cleanup
+removes the cache container, its volumes, and generated configuration.
+Persistent source caching is explicitly disabled
+because Zuul already stages speculative source trees and the builder is
+disposable.
+
+`s2i_ci_use_provider_pip_mirror` controls whether the parent-provided
+`pip.conf` is mounted, `s2i_ci_enable_rpm_cache` controls the RPM proxy, and
+`s2i_ci_rpm_cache_use_provider_mirror` controls its optional CentOS Stream
+backend remap. Disabling Squid leaves RPM repository access unchanged;
+the provider mirror still applies to Python downloads when its pip option is
+enabled. The content-provider currently disables the RPM backend remap because
+the Vexxhost mirror does not carry the CentOS Stream 10 SIG repositories used
+by these images. Squid therefore caches their original repository URLs.
+Collapsed forwarding combines concurrent requests for the same object, and
+`repomd.xml` remains fresh for the two-hour job despite DNF cache-bypass
+headers. Squid access and error logs are staged under
+`zuul-output/logs/squid/` for troubleshooting.
+
 In this repository the provider defaults to `all`, so every maintained image
 is built from its exact `sources.txt` pins. A child job can set `s2i_ci_images`
 to an explicit list of image targets; the provider resolves the selection

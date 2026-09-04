@@ -224,7 +224,9 @@ test_build_uses_opt_in_package_caches() {
     _run build alpha/one >"${TEST_DIR}/build.log" 2>&1
 
   assert_grep 'pip.conf:/etc/pip.conf:ro,z' "${TEST_DIR}/build.log"
-  assert_grep 'HTTP_PROXY=http://cache.test:3142' "${TEST_DIR}/build.log"
+  assert_grep 'build-arg HTTP_PROXY=http://cache.test:3142' \
+    "${TEST_DIR}/build.log"
+  assert_no_grep '^HTTP_PROXY=http://cache.test:3142' "${TEST_DIR}/build.log"
   assert_grep 'index-url = http://cache.test:3141/index/' \
     "${TEST_DIR}/.tmp/local-package-cache/pip.conf"
   assert_grep 'trusted-host = cache.test' \
@@ -240,6 +242,44 @@ test_build_fails_when_package_cache_is_unavailable() {
 
   assert "non-zero exit" test "${rc}" -ne 0
   assert_grep 'cache is unavailable' "${TEST_DIR}/build.log"
+  assert_no_grep '^ARGS bud' "${TEST_DIR}/build.log"
+}
+
+test_build_uses_supplied_pip_config() {
+  local pip_config="${TEST_DIR}/ci-pip.conf"
+  printf '[global]\nindex-url = http://mirror.test/pypi/simple\n' \
+    > "${pip_config}"
+
+  BUILD_PIP_CONFIG_FILE="${pip_config}" \
+    _run build alpha/one >"${TEST_DIR}/build.log" 2>&1
+
+  assert_grep "${pip_config}:/etc/pip.conf:ro,z" "${TEST_DIR}/build.log"
+}
+
+test_build_scopes_supplied_proxy_to_run_steps() {
+  BUILD_HTTP_PROXY=http://cache.test:3142 \
+    BUILD_HTTPS_PROXY=http://cache.test:3142 \
+    BUILD_NO_PROXY=mirror.test \
+    _run build alpha/one >"${TEST_DIR}/build.log" 2>&1
+
+  assert_grep 'build-arg HTTP_PROXY=http://cache.test:3142' \
+    "${TEST_DIR}/build.log"
+  assert_grep 'build-arg HTTPS_PROXY=http://cache.test:3142' \
+    "${TEST_DIR}/build.log"
+  assert_grep 'build-arg NO_PROXY=mirror.test' "${TEST_DIR}/build.log"
+  assert_no_grep '^HTTP_PROXY=http://cache.test:3142' "${TEST_DIR}/build.log"
+}
+
+test_build_rejects_local_cache_with_pip_config() {
+  local rc=0
+  local pip_config="${TEST_DIR}/ci-pip.conf"
+  printf '[global]\n' > "${pip_config}"
+
+  LOCAL_PACKAGE_CACHE=true BUILD_PIP_CONFIG_FILE="${pip_config}" \
+    _run build alpha/one >"${TEST_DIR}/build.log" 2>&1 || rc=$?
+
+  assert "non-zero exit" test "${rc}" -ne 0
+  assert_grep 'cannot be combined' "${TEST_DIR}/build.log"
   assert_no_grep '^ARGS bud' "${TEST_DIR}/build.log"
 }
 
@@ -287,6 +327,9 @@ TESTS=(
   test_build_omits_package_cache_by_default
   test_build_uses_opt_in_package_caches
   test_build_fails_when_package_cache_is_unavailable
+  test_build_uses_supplied_pip_config
+  test_build_scopes_supplied_proxy_to_run_steps
+  test_build_rejects_local_cache_with_pip_config
   test_parallel_build_produces_logs
   test_parallel_build_shows_live_output
   test_parallel_failure_propagates

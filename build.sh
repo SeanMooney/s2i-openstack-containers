@@ -103,6 +103,10 @@
 #   LOCAL_RPM_PROXY   Squid URL visible inside build containers.
 #   LOCAL_PYPI_HEALTH_URL  Host-side URL used to check Proxpi readiness.
 #   LOCAL_RPM_HEALTH_URL  Host-side Squid URL used for its readiness check.
+#   BUILD_PIP_CONFIG_FILE  Optional pip.conf mounted into build containers.
+#   BUILD_HTTP_PROXY  Optional HTTP proxy passed only to Buildah RUN steps.
+#   BUILD_HTTPS_PROXY Optional HTTPS proxy passed only to Buildah RUN steps.
+#   BUILD_NO_PROXY    Optional proxy exclusion list for Buildah RUN steps.
 #   SOURCE_CACHE      If true, retain bare Git caches for source repositories
 #                     (default: false).
 #   SOURCE_CACHE_DIR  Bare Git source-cache location
@@ -141,6 +145,10 @@ LOCAL_PYPI_TRUSTED_HOST="${LOCAL_PYPI_TRUSTED_HOST:-host.containers.internal}"
 LOCAL_RPM_PROXY="${LOCAL_RPM_PROXY:-http://host.containers.internal:3142}"
 LOCAL_PYPI_HEALTH_URL="${LOCAL_PYPI_HEALTH_URL:-http://127.0.0.1:3141/}"
 LOCAL_RPM_HEALTH_URL="${LOCAL_RPM_HEALTH_URL:-http://127.0.0.1:3142}"
+BUILD_PIP_CONFIG_FILE="${BUILD_PIP_CONFIG_FILE:-}"
+BUILD_HTTP_PROXY="${BUILD_HTTP_PROXY:-}"
+BUILD_HTTPS_PROXY="${BUILD_HTTPS_PROXY:-}"
+BUILD_NO_PROXY="${BUILD_NO_PROXY:-}"
 SOURCE_CACHE="${SOURCE_CACHE:-false}"
 SOURCE_CACHE_DIR="${SOURCE_CACHE_DIR:-${REPO_ROOT}/.tmp/source_cache}"
 if [[ "${SOURCE_CACHE}" != "true" && "${SOURCE_CACHE}" != "false" ]]; then
@@ -498,10 +506,54 @@ resolve_and_extract_source_file() {
 # Optional local package caches are build-only. Their lifecycle is deliberately
 # managed outside this script; see tools/local-package-cache/compose.yaml.
 declare -a _BUILDAH_BUD_ARGS=()
-declare -a _BUILDAH_BUD_ENV=()
+
+add_build_proxy_args() {
+  local http_proxy="$1"
+  local https_proxy="$2"
+  local no_proxy="$3"
+  local name value
+
+  for name in HTTP_PROXY HTTPS_PROXY NO_PROXY; do
+    case "${name}" in
+      HTTP_PROXY) value="${http_proxy}" ;;
+      HTTPS_PROXY) value="${https_proxy}" ;;
+      NO_PROXY) value="${no_proxy}" ;;
+    esac
+    [[ -n "${value}" ]] || continue
+    _BUILDAH_BUD_ARGS+=(--build-arg "${name}=${value}")
+    _BUILDAH_BUD_ARGS+=(--build-arg "${name,,}=${value}")
+  done
+}
+
+prepare_build_proxy() {
+  add_build_proxy_args \
+    "${BUILD_HTTP_PROXY}" "${BUILD_HTTPS_PROXY}" "${BUILD_NO_PROXY}"
+}
+
+prepare_build_pip_config() {
+  [[ -n "${BUILD_PIP_CONFIG_FILE}" ]] || return 0
+  if [[ "${LOCAL_PACKAGE_CACHE}" == "true" ]]; then
+    echo "ERROR: Local package cache and BUILD_PIP_CONFIG_FILE cannot be combined" >&2
+    return 1
+  fi
+  if [[ ! -f "${BUILD_PIP_CONFIG_FILE}" || \
+        ! -r "${BUILD_PIP_CONFIG_FILE}" ]]; then
+    echo "ERROR: Build pip configuration is not readable: ${BUILD_PIP_CONFIG_FILE}" >&2
+    return 1
+  fi
+  _BUILDAH_BUD_ARGS+=(
+    --volume "${BUILD_PIP_CONFIG_FILE}:/etc/pip.conf:ro,z"
+  )
+  echo "--- Using build pip configuration: ${BUILD_PIP_CONFIG_FILE} ---"
+}
 
 prepare_local_package_cache() {
   [[ "${LOCAL_PACKAGE_CACHE}" == "true" ]] || return 0
+
+  if [[ -n "${BUILD_HTTP_PROXY}${BUILD_HTTPS_PROXY}${BUILD_NO_PROXY}" ]]; then
+    echo "ERROR: Local package cache and build proxy settings cannot be combined" >&2
+    return 1
+  fi
 
   if ! command -v curl >/dev/null; then
     echo "ERROR: curl is required when LOCAL_PACKAGE_CACHE=true" >&2
@@ -534,17 +586,12 @@ EOF
   local cache_no_proxy="host.containers.internal,localhost,127.0.0.1"
   [[ -n "${NO_PROXY:-}" ]] && cache_no_proxy+=",${NO_PROXY}"
   _BUILDAH_BUD_ARGS+=(--volume "${pip_config}:/etc/pip.conf:ro,z")
-  _BUILDAH_BUD_ENV+=(
-    "HTTP_PROXY=${LOCAL_RPM_PROXY}"
-    "http_proxy=${LOCAL_RPM_PROXY}"
-    "NO_PROXY=${cache_no_proxy}"
-    "no_proxy=${cache_no_proxy}"
-  )
+  add_build_proxy_args "${LOCAL_RPM_PROXY}" "" "${cache_no_proxy}"
   echo "--- Using local package caches: Proxpi and Squid ---"
 }
 
 buildah_bud() {
-  env "${_BUILDAH_BUD_ENV[@]}" buildah bud "${_BUILDAH_BUD_ARGS[@]}" "$@"
+  buildah bud "${_BUILDAH_BUD_ARGS[@]}" "$@"
 }
 
 # Ensure constraints file exists for a project.
@@ -1897,12 +1944,16 @@ fi
 
 case "${ACTION}" in
   build)
+    prepare_build_proxy
+    prepare_build_pip_config
     prepare_local_package_cache
     for img in $(resolve_targets "${TARGETS[@]}"); do
       build_image "${img}"
     done
     ;;
   build-parallel)
+    prepare_build_proxy
+    prepare_build_pip_config
     prepare_local_package_cache
     _bp_targets=($(resolve_targets "${TARGETS[@]}"))
     if [[ ! "${PARALLEL}" =~ ^[1-9][0-9]*$ ]]; then
@@ -2198,6 +2249,10 @@ case "${ACTION}" in
     echo "  LOCAL_RPM_PROXY      Squid URL visible inside build containers"
     echo "  LOCAL_PYPI_HEALTH_URL  Host-side Proxpi readiness URL"
     echo "  LOCAL_RPM_HEALTH_URL  Host-side Squid URL used for its readiness check"
+    echo "  BUILD_PIP_CONFIG_FILE  pip.conf mounted into build containers"
+    echo "  BUILD_HTTP_PROXY     HTTP proxy for Buildah RUN steps"
+    echo "  BUILD_HTTPS_PROXY    HTTPS proxy for Buildah RUN steps"
+    echo "  BUILD_NO_PROXY       Proxy exclusions for Buildah RUN steps"
     echo "  SOURCE_CACHE         Retain bare Git source caches (default: false)"
     echo "  SOURCE_CACHE_DIR     Bare Git source-cache location (default: .tmp/source_cache)"
     echo ""
