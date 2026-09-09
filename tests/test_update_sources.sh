@@ -10,6 +10,10 @@
 #
 set -uo pipefail
 
+# Keep local Git fixtures independent of user and system configuration.
+export GIT_CONFIG_GLOBAL=/dev/null
+export GIT_CONFIG_NOSYSTEM=1
+
 # ── Test runner ──────────────────────────────────────────────────────────
 
 _PASS=0
